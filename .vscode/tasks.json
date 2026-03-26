@@ -1,0 +1,20 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "metro-reset-8081",
+			"type": "shell",
+			"command": "npx",
+			"args": [
+				"react-native",
+				"start",
+				"--port",
+				"8081",
+				"--no-interactive",
+				"--reset-cache"
+			],
+			"isBackground": true,
+			"group": "build"
+		}
+	]
+}
