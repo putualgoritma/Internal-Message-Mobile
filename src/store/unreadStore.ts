@@ -1,5 +1,9 @@
 import {create} from 'zustand';
 
+function sumUnreadMap(map: Record<number, number>): number {
+  return Object.values(map).reduce((total, value) => total + Math.max(0, value), 0);
+}
+
 interface UnreadState {
   totalChatUnread: number;
   unreadNotificationCount: number;
@@ -18,11 +22,20 @@ export const useUnreadStore = create<UnreadState>(set => ({
   setUnreadNotificationCount: value =>
     set({unreadNotificationCount: Math.max(0, value)}),
   setConversationUnread: (conversationId, value) =>
-    set(state => ({
-      unreadByConversation: {
+    set(state => {
+      const unreadByConversation = {
         ...state.unreadByConversation,
         [conversationId]: Math.max(0, value),
-      },
-    })),
-  setConversationUnreadMap: map => set({unreadByConversation: map}),
+      };
+
+      return {
+        unreadByConversation,
+        totalChatUnread: sumUnreadMap(unreadByConversation),
+      };
+    }),
+  setConversationUnreadMap: map =>
+    set({
+      unreadByConversation: map,
+      totalChatUnread: sumUnreadMap(map),
+    }),
 }));

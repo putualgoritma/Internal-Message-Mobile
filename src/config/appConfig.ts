@@ -18,7 +18,7 @@ const DEFAULT_CONFIG: AppConfig = {
   wsHost: '10.0.2.2',
   wsPort: 6001,
   wsScheme: 'http',
-  wsPath: '/app',
+  wsPath: '',     // pusher-js appends /app/{key} automatically; do NOT put '/app' here
   wsAppKey: 'local',
   wsCluster: 'mt1',
   oneSignalAppId: '',

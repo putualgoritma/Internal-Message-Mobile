@@ -12,10 +12,17 @@ export function useRealtime(): void {
   const userId = useAuthStore(state => state.user?.id);
   const isAuthenticated = useAuthStore(state => state.isAuthenticated);
   const conversations = useChatStore(state => state.conversations);
-  const conversationIds = useMemo(
-    () => conversations.map(item => item.id),
-    [conversations],
+  const messagesByConversation = useChatStore(
+    state => state.messagesByConversation,
   );
+  const conversationIds = useMemo(() => {
+    const fromConversations = conversations.map(item => item.id);
+    const fromLoadedMessageBuckets = Object.keys(messagesByConversation)
+      .map(value => Number(value))
+      .filter(value => Number.isFinite(value) && value > 0);
+
+    return Array.from(new Set([...fromConversations, ...fromLoadedMessageBuckets]));
+  }, [conversations, messagesByConversation]);
 
   const stableConversationKey = useMemo(
     () => conversationIds.slice().sort((a, b) => a - b).join(','),
@@ -23,6 +30,8 @@ export function useRealtime(): void {
   );
 
   useEffect(() => {
+    let lastFallbackSyncAt = 0;
+
     if (!isAuthenticated || !token || !userId) {
       websocketService.disconnect();
       return;
@@ -41,10 +50,6 @@ export function useRealtime(): void {
             .prependIncomingNotification(notification);
         },
         onUnreadUpdated: payload => {
-          useUnreadStore
-            .getState()
-            .setTotalChatUnread(payload.totalChatUnread);
-
           if (payload.conversationId && payload.conversationUnread !== null) {
             useUnreadStore
               .getState()
@@ -52,7 +57,28 @@ export function useRealtime(): void {
                 payload.conversationId,
                 payload.conversationUnread,
               );
+
+            // Fallback path: some backends only emit unread events and not message events.
+            // Pull the latest messages so Chat Room updates without manual refresh.
+            useChatStore
+              .getState()
+              .fetchMessages(payload.conversationId)
+              .catch(() => {
+                // Store captures error state.
+              });
+          } else {
+            useUnreadStore
+              .getState()
+              .setTotalChatUnread(payload.totalChatUnread);
           }
+
+          // Keep chat list in sync even if message event names differ server-side.
+          useChatStore
+            .getState()
+            .fetchConversations()
+            .catch(() => {
+              // Store captures error state.
+            });
 
           if (payload.notificationUnread !== null) {
             useUnreadStore
@@ -60,8 +86,30 @@ export function useRealtime(): void {
               .setUnreadNotificationCount(payload.notificationUnread);
           }
         },
+        onAnyRealtimeEvent: () => {
+          const now = Date.now();
+          if (now - lastFallbackSyncAt < 1000) {
+            return;
+          }
+
+          lastFallbackSyncAt = now;
+          useChatStore
+            .getState()
+            .fetchConversations()
+            .catch(() => {
+              // Store captures error state.
+            });
+        },
       },
     });
+
+    // Prime conversations so realtime subscription has channel IDs early.
+    useChatStore
+      .getState()
+      .fetchConversations()
+      .catch(() => {
+        // Store captures error state.
+      });
 
     return () => {
       websocketService.disconnect();

@@ -18,6 +18,7 @@ import {chatApi} from '../api/chatApi';
 import {useAuthStore} from '../store/authStore';
 import {useChatStore} from '../store/chatStore';
 import {useUnreadStore} from '../store/unreadStore';
+import {useRealtimeStore} from '../store/realtimeStore';
 import type {RootStackParamList} from '../navigation/types';
 import type {ChatMessage} from '../types/models';
 
@@ -31,6 +32,8 @@ export function ChatListScreen(): React.JSX.Element {
   const loadingConversations = useChatStore(state => state.loadingConversations);
   const error = useChatStore(state => state.error);
   const unreadByConversation = useUnreadStore(state => state.unreadByConversation);
+  const wsStatus = useRealtimeStore(state => state.status);
+  const wsLastEvent = useRealtimeStore(state => state.lastEvent);
   const [derivedTitles, setDerivedTitles] = useState<Record<number, string>>({});
 
   const refreshConversations = useCallback(() => {
@@ -42,6 +45,7 @@ export function ChatListScreen(): React.JSX.Element {
   useFocusEffect(
     useCallback(() => {
       refreshConversations();
+
     }, [refreshConversations]),
   );
 
@@ -110,8 +114,16 @@ export function ChatListScreen(): React.JSX.Element {
     };
   }, [conversationIdsKey, conversations, currentUserId]);
 
+  const wsColor =
+    wsStatus === 'connected' ? '#198754' : wsStatus === 'connecting' ? '#C28135' : '#D64545';
+
   return (
     <View style={styles.container}>
+      {/* Temporary WS debug bar — remove once realtime is confirmed working */}
+      <View style={{backgroundColor: wsColor + '22', borderLeftWidth: 3, borderLeftColor: wsColor, paddingHorizontal: 10, paddingVertical: 6, marginBottom: 4}}>
+        <Text style={{color: wsColor, fontSize: 11, fontWeight: '700'}}>{`WS: ${wsStatus.toUpperCase()}`}</Text>
+        <Text style={{color: wsColor, fontSize: 10, fontWeight: '400'}} numberOfLines={2}>{wsLastEvent ?? 'no events yet'}</Text>
+      </View>
       <View style={styles.headerRow}>
         <Text style={styles.heading}>Chats</Text>
         <Pressable

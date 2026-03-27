@@ -9,8 +9,9 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import type {FlatList as FlatListType} from 'react-native';
 
-import {RouteProp} from '@react-navigation/native';
+import {RouteProp, useFocusEffect} from '@react-navigation/native';
 
 import {chatApi} from '../api/chatApi';
 import {ChatBubble} from '../components/ChatBubble';
@@ -19,7 +20,7 @@ import {ErrorBanner} from '../components/ErrorBanner';
 import {colors} from '../theme/colors';
 import type {RootStackParamList} from '../navigation/types';
 import {useAuthStore} from '../store/authStore';
-import {useUnreadStore} from '../store/unreadStore';
+import {useChatStore} from '../store/chatStore';
 import type {ChatMessage} from '../types/models';
 
 type ChatRoomRouteProp = RouteProp<RootStackParamList, 'ChatRoom'>;
@@ -29,14 +30,28 @@ interface ChatRoomScreenProps {
 }
 
 function sortMessages(messages: ChatMessage[]): ChatMessage[] {
-  return [...messages].sort(
-    (a, b) =>
-      new Date(a.created_at).getTime() - new Date(b.created_at).getTime(),
-  );
-}
+  return [...messages].sort((a, b) => {
+    const timeA = new Date(a.created_at).getTime();
+    const timeB = new Date(b.created_at).getTime();
 
-function hasMessage(messages: ChatMessage[], messageId: number): boolean {
-  return messages.some(item => item.id === messageId);
+    // If both timestamps are valid, sort by time
+    if (Number.isFinite(timeA) && Number.isFinite(timeB)) {
+      return timeA - timeB;
+    }
+
+    // If only A is valid, A comes first
+    if (Number.isFinite(timeA)) {
+      return -1;
+    }
+
+    // If only B is valid, B comes first
+    if (Number.isFinite(timeB)) {
+      return 1;
+    }
+
+    // If neither is valid, maintain relative order by ID
+    return Number(a.id) - Number(b.id);
+  });
 }
 
 export function ChatRoomScreen({route}: ChatRoomScreenProps): React.JSX.Element {
@@ -49,73 +64,56 @@ export function ChatRoomScreen({route}: ChatRoomScreenProps): React.JSX.Element 
     return Number.isFinite(raw) && raw > 0 ? raw : null;
   }, [route.params.recipientUserId]);
 
-  const initialConversationIdRef = useRef<number | null>(conversationId);
   const [activeConversationId, setActiveConversationId] = useState<number | null>(
     conversationId,
   );
 
   const currentUserId = useAuthStore(state => state.user?.id);
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [loadingMessages, setLoadingMessages] = useState(true);
+  const fetchMessages = useChatStore(state => state.fetchMessages);
+  const markConversationRead = useChatStore(state => state.markConversationRead);
+  const loadingMessages = useChatStore(state => state.loadingMessages);
+  const messagesByConversation = useChatStore(state => state.messagesByConversation);
+
+  // Derive sorted messages from the store so realtime updates appear automatically
+  const messages = useMemo(
+    () => sortMessages(messagesByConversation[activeConversationId ?? 0] ?? []),
+    [messagesByConversation, activeConversationId],
+  );
+
   const [sendingMessage, setSendingMessage] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [draft, setDraft] = useState('');
+  const flatListRef = useRef<FlatListType<ChatMessage>>(null);
 
+  // Scroll to bottom whenever message list grows
+  const messageCount = messages.length;
   useEffect(() => {
-    let isMounted = true;
-    const targetConversationId = initialConversationIdRef.current;
+    if (messageCount > 0) {
+      flatListRef.current?.scrollToEnd({animated: true});
+    }
+  }, [messageCount]);
 
-    const loadConversation = async () => {
-      if (!targetConversationId) {
-        if (isMounted) {
-          setLoadingMessages(false);
-        }
-        return;
+  // Load messages from store on mount
+  useEffect(() => {
+    if (!conversationId) {
+      return;
+    }
+
+    fetchMessages(conversationId).catch(() => {});
+    markConversationRead(conversationId).catch(() => {});
+  }, [conversationId, fetchMessages, markConversationRead]);
+
+  // Auto-mark-read when screen gains focus (clears badge if new messages arrived while away)
+  useFocusEffect(
+    useCallback(() => {
+      if (!activeConversationId) {
+        return () => {};
       }
 
-      if (isMounted) {
-        setLoadingMessages(true);
-        setError(null);
-      }
+      markConversationRead(activeConversationId).catch(() => {});
 
-      try {
-        const fetchedMessages = await chatApi.getMessages(targetConversationId);
-        if (isMounted) {
-          setMessages(sortMessages(fetchedMessages));
-        }
-
-        await chatApi.markConversationRead(targetConversationId);
-
-        const unreadStore = useUnreadStore.getState();
-        const previousUnread =
-          unreadStore.unreadByConversation[targetConversationId] ?? 0;
-        unreadStore.setConversationUnread(targetConversationId, 0);
-        unreadStore.setTotalChatUnread(
-          Math.max(0, unreadStore.totalChatUnread - previousUnread),
-        );
-      } catch (loadError) {
-        if (isMounted) {
-          setError(
-            loadError instanceof Error
-              ? loadError.message
-              : 'Failed to load messages.',
-          );
-        }
-      } finally {
-        if (isMounted) {
-          setLoadingMessages(false);
-        }
-      }
-    };
-
-    loadConversation().catch(() => {
-      // Errors are captured in local state above.
-    });
-
-    return () => {
-      isMounted = false;
-    };
-  }, []);
+    }, [activeConversationId, markConversationRead]),
+  );
 
   const onSubmit = useCallback(async () => {
     const trimmed = draft.trim();
@@ -148,15 +146,11 @@ export function ChatRoomScreen({route}: ChatRoomScreenProps): React.JSX.Element 
 
       if (!activeConversationId && newMessage.conversation_id) {
         setActiveConversationId(newMessage.conversation_id);
+        fetchMessages(newMessage.conversation_id).catch(() => {});
       }
 
-      setMessages(previous => {
-        if (hasMessage(previous, newMessage.id)) {
-          return previous;
-        }
-
-        return sortMessages([...previous, newMessage]);
-      });
+      // Add to store so the message appears via the store subscription
+      useChatStore.getState().upsertIncomingMessage(newMessage);
       setDraft('');
     } catch (sendError) {
       setError(
@@ -165,7 +159,7 @@ export function ChatRoomScreen({route}: ChatRoomScreenProps): React.JSX.Element 
     } finally {
       setSendingMessage(false);
     }
-  }, [activeConversationId, draft, recipientUserId]);
+  }, [activeConversationId, draft, fetchMessages, recipientUserId]);
 
   return (
     <KeyboardAvoidingView
@@ -175,6 +169,7 @@ export function ChatRoomScreen({route}: ChatRoomScreenProps): React.JSX.Element 
       {error ? <ErrorBanner message={error} /> : null}
 
       <FlatList
+        ref={flatListRef}
         contentContainerStyle={styles.list}
         data={messages}
         keyExtractor={item => String(item.id)}

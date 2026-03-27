@@ -3,6 +3,7 @@ import {create} from 'zustand';
 import {chatApi} from '../api/chatApi';
 import type {ChatMessage, Conversation} from '../types/models';
 import {toErrorMessage} from '../utils/api';
+import {useAuthStore} from './authStore';
 import {useUnreadStore} from './unreadStore';
 
 interface ChatState {
@@ -29,9 +30,28 @@ function toConversationUnreadMap(
 }
 
 function sortByCreatedAt(messages: ChatMessage[]): ChatMessage[] {
-  return [...messages].sort(
-    (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime(),
-  );
+  return [...messages].sort((a, b) => {
+    const timeA = new Date(a.created_at).getTime();
+    const timeB = new Date(b.created_at).getTime();
+
+    // If both timestamps are valid, sort by time (ascending - oldest first)
+    if (Number.isFinite(timeA) && Number.isFinite(timeB)) {
+      return timeA - timeB;
+    }
+
+    // If only A is valid, A comes first
+    if (Number.isFinite(timeA)) {
+      return -1;
+    }
+
+    // If only B is valid, B comes first
+    if (Number.isFinite(timeB)) {
+      return 1;
+    }
+
+    // If neither is valid, fall back to ID ordering
+    return (a.id ?? 0) - (b.id ?? 0);
+  });
 }
 
 function messageExists(messages: ChatMessage[], messageId: number): boolean {
@@ -51,14 +71,36 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     try {
       const conversations = await chatApi.getConversations();
-      const totalUnread = await chatApi.getUnreadTotal();
+
+      const currentUnreadMap = useUnreadStore.getState().unreadByConversation;
+
+      const mergedConversations = conversations.map(item => {
+        const serverUnread = Number(item.unread_count ?? 0);
+        const localUnread = currentUnreadMap[item.id]; // undefined = never set locally
+
+        if (localUnread === undefined) {
+          // No local state yet — trust server
+          return item;
+        }
+        if (localUnread === 0) {
+          // User explicitly marked as read — keep 0 regardless of server lag
+          return {...item, unread_count: 0};
+        }
+        // WS has incremented locally — take the higher value so badge never goes backwards
+        return {...item, unread_count: Math.max(localUnread, serverUnread)};
+      });
 
       useUnreadStore
         .getState()
-        .setConversationUnreadMap(toConversationUnreadMap(conversations));
-      useUnreadStore.getState().setTotalChatUnread(totalUnread);
+        .setConversationUnreadMap(toConversationUnreadMap(mergedConversations));
 
-      set({conversations});
+      const sortedConversations = [...mergedConversations].sort((a, b) => {
+        const tA = a.updated_at ? new Date(a.updated_at).getTime() : 0;
+        const tB = b.updated_at ? new Date(b.updated_at).getTime() : 0;
+        return tB - tA;
+      });
+
+      set({conversations: sortedConversations});
     } catch (error) {
       set({error: toErrorMessage(error)});
     } finally {
@@ -106,37 +148,53 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   markConversationRead: async (conversationId: number) => {
-    const unreadByConversation = useUnreadStore.getState().unreadByConversation;
-    const previousUnread = unreadByConversation[conversationId] ?? 0;
-
     try {
       await chatApi.markConversationRead(conversationId);
       useUnreadStore.getState().setConversationUnread(conversationId, 0);
 
-      const totalUnread = useUnreadStore.getState().totalChatUnread;
-      useUnreadStore
-        .getState()
-        .setTotalChatUnread(Math.max(0, totalUnread - previousUnread));
+      set(state => ({
+        conversations: state.conversations.map(item =>
+          item.id === conversationId ? {...item, unread_count: 0} : item,
+        ),
+      }));
     } catch (error) {
       set({error: toErrorMessage(error)});
     }
   },
 
   upsertIncomingMessage: (message: ChatMessage) => {
-    const conversationId = message.conversation_id;
-    const existing = get().messagesByConversation[conversationId] ?? [];
-
-    if (messageExists(existing, message.id)) {
+    // Quick duplicate check before acquiring lock
+    const snapshot = get().messagesByConversation[message.conversation_id] ?? [];
+    if (messageExists(snapshot, message.id)) {
       return;
     }
 
+    const conversationId = message.conversation_id;
+
+    // Increment badge for messages arriving from other users
+    const currentUserId = useAuthStore.getState().user?.id;
+    if (message.sender_id != null && message.sender_id !== currentUserId) {
+      const currentUnread =
+        useUnreadStore.getState().unreadByConversation[conversationId] ?? 0;
+      useUnreadStore
+        .getState()
+        .setConversationUnread(conversationId, currentUnread + 1);
+    }
+
     set(state => {
-      const updatedMessages = sortByCreatedAt([...existing, message]);
-      const conversations = state.conversations.map(item => {
+      // Use state inside set() to avoid stale closure over `existing`
+      const current = state.messagesByConversation[conversationId] ?? [];
+      if (messageExists(current, message.id)) {
+        return state;
+      }
+      const updatedMessages = sortByCreatedAt([...current, message]);
+
+      let foundConversation = false;
+      const updatedConversations = state.conversations.map(item => {
         if (item.id !== conversationId) {
           return item;
         }
-
+        foundConversation = true;
         return {
           ...item,
           last_message: message,
@@ -144,8 +202,28 @@ export const useChatStore = create<ChatState>((set, get) => ({
         };
       });
 
+      const mergedConversations = foundConversation
+        ? updatedConversations
+        : [
+            {
+              id: conversationId,
+              last_message: message,
+              unread_count:
+                message.sender_id != null && message.sender_id !== currentUserId ? 1 : 0,
+              updated_at: message.created_at,
+            },
+            ...updatedConversations,
+          ];
+
+      // Bubble updated conversation to the top of the list
+      const sorted = [...mergedConversations].sort((a, b) => {
+        const tA = a.updated_at ? new Date(a.updated_at).getTime() : 0;
+        const tB = b.updated_at ? new Date(b.updated_at).getTime() : 0;
+        return tB - tA;
+      });
+
       return {
-        conversations,
+        conversations: sorted,
         messagesByConversation: {
           ...state.messagesByConversation,
           [conversationId]: updatedMessages,

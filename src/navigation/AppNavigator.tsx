@@ -29,10 +29,10 @@ function tabIconForRoute(
   focused: boolean,
 ): string {
   switch (routeName) {
-    case 'Dashboard':
-      return focused ? 'view-dashboard' : 'view-dashboard-outline';
     case 'Chat':
       return focused ? 'chat' : 'chat-outline';
+    case 'Profile':
+      return focused ? 'account-circle' : 'account-circle-outline';
     case 'Notifications':
       return focused ? 'bell' : 'bell-outline';
     default:
@@ -65,7 +65,6 @@ function MainTabs(): React.JSX.Element {
           />
         ),
       })}>
-      <Tab.Screen component={DashboardScreen} name="Dashboard" />
       <Tab.Screen
         component={ChatListScreen}
         name="Chat"
@@ -73,6 +72,7 @@ function MainTabs(): React.JSX.Element {
           tabBarBadge: totalChatUnread > 0 ? totalChatUnread : undefined,
         }}
       />
+      <Tab.Screen component={DashboardScreen} name="Profile" />
       <Tab.Screen
         component={NotificationScreen}
         name="Notifications"

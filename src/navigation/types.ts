@@ -13,7 +13,7 @@ export type AuthStackParamList = {
 };
 
 export type MainTabParamList = {
-  Dashboard: undefined;
   Chat: undefined;
+  Profile: undefined;
   Notifications: undefined;
 };

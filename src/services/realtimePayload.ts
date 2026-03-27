@@ -7,7 +7,40 @@ export interface NormalizedUnreadPayload {
   notificationUnread: number | null;
 }
 
+function tryParseJson(value: string): unknown {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+}
+
 function asObject(value: unknown): Record<string, unknown> | null {
+  if (typeof value === 'string') {
+    const first = tryParseJson(value);
+    if (first && typeof first === 'object' && !Array.isArray(first)) {
+      return first as Record<string, unknown>;
+    }
+
+    if (typeof first === 'string') {
+      const second = tryParseJson(first);
+      if (second && typeof second === 'object' && !Array.isArray(second)) {
+        return second as Record<string, unknown>;
+      }
+    }
+
+    return null;
+  }
+
   return value && typeof value === 'object'
     ? (value as Record<string, unknown>)
     : null;
@@ -43,18 +76,40 @@ function readNestedObject(
     }
   }
 
+  // Pusher often wraps app event payload under "data" as a JSON string.
+  const nestedData = asObject(root.data);
+  if (nestedData) {
+    for (const key of keys) {
+      const nested = asObject(nestedData[key]);
+      if (nested) {
+        return nested;
+      }
+    }
+
+    return nestedData;
+  }
+
   return root;
 }
 
 export function normalizeMessagePayload(payload: unknown): ChatMessage | null {
-  const candidate = readNestedObject(payload, ['message', 'data', 'payload']);
+  const candidate = readNestedObject(payload, [
+    'message',
+    'data',
+    'payload',
+    'chat_message',
+    'chatMessage',
+  ]);
 
   const conversationId = asNumber(
     candidate.conversation_id ?? candidate.conversationId,
     0,
   );
 
-  const content = asString(candidate.content, '').trim();
+  const content = asString(
+    candidate.content ?? candidate.body ?? candidate.text ?? candidate.message,
+    '',
+  ).trim();
   if (conversationId <= 0 || !content) {
     return null;
   }
