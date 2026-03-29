@@ -5,6 +5,10 @@ import {useChatStore} from '../store/chatStore';
 import {useNotificationStore} from '../store/notificationStore';
 import {useUnreadStore} from '../store/unreadStore';
 import {websocketService} from '../services/websocketService';
+import {
+  playIncomingMessageSound,
+  preloadIncomingMessageSound,
+} from '../services/messageSound';
 import type {ChatMessage, NotificationItem} from '../types/models';
 
 export function useRealtime(): void {
@@ -37,11 +41,16 @@ export function useRealtime(): void {
       return;
     }
 
+    preloadIncomingMessageSound();
+
     websocketService.connect({
       token,
       userId,
       callbacks: {
         onIncomingMessage: (message: ChatMessage) => {
+          if (message.sender_id != null && message.sender_id !== userId) {
+            playIncomingMessageSound();
+          }
           useChatStore.getState().upsertIncomingMessage(message);
         },
         onIncomingNotification: (notification: NotificationItem) => {

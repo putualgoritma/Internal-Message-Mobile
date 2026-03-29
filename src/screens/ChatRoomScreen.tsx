@@ -12,6 +12,7 @@ import {
 import type {FlatList as FlatListType} from 'react-native';
 
 import {RouteProp, useFocusEffect} from '@react-navigation/native';
+import {useIsFocused} from '@react-navigation/native';
 
 import {chatApi} from '../api/chatApi';
 import {ChatBubble} from '../components/ChatBubble';
@@ -55,6 +56,7 @@ function sortMessages(messages: ChatMessage[]): ChatMessage[] {
 }
 
 export function ChatRoomScreen({route}: ChatRoomScreenProps): React.JSX.Element {
+  const isFocused = useIsFocused();
   const conversationId = useMemo(() => {
     const raw = Number(route.params.conversationId);
     return Number.isFinite(raw) && raw > 0 ? raw : null;
@@ -84,6 +86,7 @@ export function ChatRoomScreen({route}: ChatRoomScreenProps): React.JSX.Element 
   const [error, setError] = useState<string | null>(null);
   const [draft, setDraft] = useState('');
   const flatListRef = useRef<FlatListType<ChatMessage>>(null);
+  const lastAutoReadMessageIdRef = useRef<number | null>(null);
 
   // Scroll to bottom whenever message list grows
   const messageCount = messages.length;
@@ -114,6 +117,31 @@ export function ChatRoomScreen({route}: ChatRoomScreenProps): React.JSX.Element 
 
     }, [activeConversationId, markConversationRead]),
   );
+
+  // When a new remote message arrives while viewing this room, clear unread immediately.
+  useEffect(() => {
+    if (!isFocused || !activeConversationId || messages.length === 0) {
+      return;
+    }
+
+    const latest = messages[messages.length - 1];
+    if (!latest || latest.sender_id == null || latest.sender_id === currentUserId) {
+      return;
+    }
+
+    if (lastAutoReadMessageIdRef.current === latest.id) {
+      return;
+    }
+
+    lastAutoReadMessageIdRef.current = latest.id;
+    markConversationRead(activeConversationId).catch(() => {});
+  }, [
+    activeConversationId,
+    currentUserId,
+    isFocused,
+    markConversationRead,
+    messages,
+  ]);
 
   const onSubmit = useCallback(async () => {
     const trimmed = draft.trim();
