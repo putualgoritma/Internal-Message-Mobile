@@ -45,6 +45,11 @@ const NOTIFICATION_EVENTS = [
   'InternalOpsNotificationCreated',
 ];
 const UNREAD_EVENTS = ['UnreadUpdated', '.UnreadUpdated'];
+const KNOWN_EVENT_NAMES = new Set([
+  ...MESSAGE_EVENTS,
+  ...NOTIFICATION_EVENTS,
+  ...UNREAD_EVENTS,
+]);
 
 class WebsocketService {
   private echo: Echo<'pusher'> | null = null;
@@ -52,6 +57,36 @@ class WebsocketService {
   private callbacks: RealtimeCallbacks | null = null;
   private userId: number | null = null;
   private conversationIds = new Set<number>();
+  private recentlyHandledMessageIds = new Map<number, number>();
+
+  private pruneHandledMessageCache(now: number): void {
+    const maxAgeMs = 15000;
+    for (const [id, timestamp] of this.recentlyHandledMessageIds.entries()) {
+      if (now - timestamp > maxAgeMs) {
+        this.recentlyHandledMessageIds.delete(id);
+      }
+    }
+  }
+
+  private emitIncomingMessage(message: ChatMessage, source: string): void {
+    const messageId = Number(message.id);
+    if (!Number.isFinite(messageId) || messageId <= 0) {
+      this.callbacks?.onIncomingMessage(message);
+      return;
+    }
+
+    const now = Date.now();
+    this.pruneHandledMessageCache(now);
+
+    const lastHandledAt = this.recentlyHandledMessageIds.get(messageId);
+    if (lastHandledAt && now - lastHandledAt < 15000) {
+      console.log('[WS] duplicate incoming message skipped:', messageId, source);
+      return;
+    }
+
+    this.recentlyHandledMessageIds.set(messageId, now);
+    this.callbacks?.onIncomingMessage(message);
+  }
 
   private extractAuthPayload(payload: unknown): ChannelAuthPayload | null {
     if (!payload || typeof payload !== 'object') {
@@ -172,38 +207,47 @@ class WebsocketService {
     // Log every raw Pusher event so Dashboard shows what the server actually sends.
     (pusherClient as unknown as {bind_global?: (cb: (ev: string, data: unknown) => void) => void})
       .bind_global?.((eventName: string, data: unknown) => {
-        // Always log pusher: protocol events (they reveal connection/auth status)
-        if (eventName.startsWith('pusher:') || eventName.startsWith('pusher_internal:subscription_error')) {
-          const snippet = data ? JSON.stringify(data).slice(0, 120) : '';
-          useRealtimeStore.getState().setLastEvent(`raw:${eventName}${snippet ? ':' + snippet : ''}`);
-        } else if (!eventName.startsWith('pusher_internal:')) {
-          const snippet = data ? JSON.stringify(data).slice(0, 120) : '';
-          useRealtimeStore.getState().setLastEvent(`raw:${eventName}${snippet ? ':' + snippet : ''}`);
-          console.log('[WS] raw app event:', eventName, snippet);
-          this.callbacks?.onAnyRealtimeEvent?.(eventName);
+        try {
+          // Always log pusher: protocol events (they reveal connection/auth status)
+          if (eventName.startsWith('pusher:') || eventName.startsWith('pusher_internal:subscription_error')) {
+            const snippet = data ? JSON.stringify(data).slice(0, 120) : '';
+            useRealtimeStore.getState().setLastEvent(`raw:${eventName}${snippet ? ':' + snippet : ''}`);
+          } else if (!eventName.startsWith('pusher_internal:')) {
+            const snippet = data ? JSON.stringify(data).slice(0, 120) : '';
+            useRealtimeStore.getState().setLastEvent(`raw:${eventName}${snippet ? ':' + snippet : ''}`);
+            console.log('[WS] raw app event:', eventName, snippet);
+            this.callbacks?.onAnyRealtimeEvent?.(eventName);
 
-          // Fallback path: some backends emit different event names than expected.
-          // Parse payload from global events so chat list + badges still update in realtime.
-          const message = normalizeMessagePayload(data);
-          if (message) {
-            this.callbacks?.onIncomingMessage(message);
-            return;
-          }
+            // Avoid double-handling events that are already handled by channel listeners.
+            if (KNOWN_EVENT_NAMES.has(eventName)) {
+              return;
+            }
 
-          const unread = normalizeUnreadPayload(data);
-          if (
-            unread.conversationId !== null ||
-            unread.notificationUnread !== null ||
-            unread.totalChatUnread > 0
-          ) {
-            this.callbacks?.onUnreadUpdated(unread);
-            return;
-          }
+            // Fallback path: some backends emit different event names than expected.
+            // Parse payload from global events so chat list + badges still update in realtime.
+            const message = normalizeMessagePayload(data);
+            if (message) {
+              this.emitIncomingMessage(message, `global:${eventName}`);
+              return;
+            }
 
-          const notification = normalizeNotificationPayload(data);
-          if (notification) {
-            this.callbacks?.onIncomingNotification(notification);
+            const unread = normalizeUnreadPayload(data);
+            if (
+              unread.conversationId !== null ||
+              unread.notificationUnread !== null ||
+              unread.totalChatUnread > 0
+            ) {
+              this.callbacks?.onUnreadUpdated(unread);
+              return;
+            }
+
+            const notification = normalizeNotificationPayload(data);
+            if (notification) {
+              this.callbacks?.onIncomingNotification(notification);
+            }
           }
+        } catch (err) {
+          console.error('[WS] Error handling global event:', eventName, err);
         }
       });
 
@@ -250,6 +294,7 @@ class WebsocketService {
     this.callbacks = null;
     this.userId = null;
     this.conversationIds.clear();
+    this.recentlyHandledMessageIds.clear();
     useRealtimeStore.getState().setStatus('disconnected');
     useRealtimeStore.getState().setLastEvent('realtime.disconnect');
   }
@@ -326,12 +371,7 @@ class WebsocketService {
       return;
     }
 
-    const userChannelNames = [
-      `internal-ops.user.${userId}`,
-      `App.Models.User.${userId}`,
-      `users.${userId}`,
-      `user.${userId}`,
-    ];
+    const userChannelNames = [`internal-ops.user.${userId}`];
 
     for (const userChannelName of userChannelNames) {
       console.log('[WS] subscribing user channel:', userChannelName);
@@ -359,34 +399,49 @@ class WebsocketService {
       // Listen here as a fallback so messages are never missed.
       for (const eventName of MESSAGE_EVENTS) {
         userChannel.listen(eventName, (payload: unknown) => {
-          useRealtimeStore
-            .getState()
-            .setLastEvent(`${userChannelName}:${eventName}`);
-          const message = normalizeMessagePayload(payload);
-          if (message) {
-            this.callbacks?.onIncomingMessage(message);
+          try {
+            useRealtimeStore
+              .getState()
+              .setLastEvent(`${userChannelName}:${eventName}`);
+            const message = normalizeMessagePayload(payload);
+            if (message) {
+              this.emitIncomingMessage(
+                message,
+                `${userChannelName}:${eventName}`,
+              );
+            }
+          } catch (err) {
+            console.error(`[WS] Error handling ${userChannelName}:${eventName}:`, err);
           }
         });
       }
 
       for (const eventName of NOTIFICATION_EVENTS) {
         userChannel.listen(eventName, (payload: unknown) => {
-          useRealtimeStore
-            .getState()
-            .setLastEvent(`${userChannelName}:${eventName}`);
-          const notification = normalizeNotificationPayload(payload);
-          if (notification) {
-            this.callbacks?.onIncomingNotification(notification);
+          try {
+            useRealtimeStore
+              .getState()
+              .setLastEvent(`${userChannelName}:${eventName}`);
+            const notification = normalizeNotificationPayload(payload);
+            if (notification) {
+              this.callbacks?.onIncomingNotification(notification);
+            }
+          } catch (err) {
+            console.error(`[WS] Error handling ${userChannelName}:${eventName}:`, err);
           }
         });
       }
 
       for (const eventName of UNREAD_EVENTS) {
         userChannel.listen(eventName, (payload: unknown) => {
-          useRealtimeStore
-            .getState()
-            .setLastEvent(`${userChannelName}:${eventName}`);
-          this.callbacks?.onUnreadUpdated(normalizeUnreadPayload(payload));
+          try {
+            useRealtimeStore
+              .getState()
+              .setLastEvent(`${userChannelName}:${eventName}`);
+            this.callbacks?.onUnreadUpdated(normalizeUnreadPayload(payload));
+          } catch (err) {
+            console.error(`[WS] Error handling ${userChannelName}:${eventName}:`, err);
+          }
         });
       }
     }
@@ -419,12 +474,19 @@ class WebsocketService {
 
     for (const eventName of MESSAGE_EVENTS) {
       channel.listen(eventName, (payload: unknown) => {
-        useRealtimeStore
-          .getState()
-          .setLastEvent(`conv.${conversationId}:${eventName}`);
-        const message = normalizeMessagePayload(payload);
-        if (message) {
-          this.callbacks?.onIncomingMessage(message);
+        try {
+          useRealtimeStore
+            .getState()
+            .setLastEvent(`conv.${conversationId}:${eventName}`);
+          const message = normalizeMessagePayload(payload);
+          if (message) {
+            this.emitIncomingMessage(
+              message,
+              `conversation.${conversationId}:${eventName}`,
+            );
+          }
+        } catch (err) {
+          console.error(`[WS] Error handling conversation ${conversationId}:${eventName}:`, err);
         }
       });
     }

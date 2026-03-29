@@ -120,21 +120,33 @@ export function ChatRoomScreen({route}: ChatRoomScreenProps): React.JSX.Element 
 
   // When a new remote message arrives while viewing this room, clear unread immediately.
   useEffect(() => {
+    console.log('[ChatRoom] Auto-read effect: isFocused=', isFocused, 'activeConversationId=', activeConversationId, 'messagesLength=', messages.length);
+    
     if (!isFocused || !activeConversationId || messages.length === 0) {
       return;
     }
 
-    const latest = messages[messages.length - 1];
-    if (!latest || latest.sender_id == null || latest.sender_id === currentUserId) {
-      return;
-    }
+    try {
+      const latest = messages[messages.length - 1];
+      console.log('[ChatRoom] Latest message:', latest?.id, 'sender_id:', latest?.sender_id, 'currentUserId:', currentUserId);
+      
+      if (!latest || latest.sender_id == null || latest.sender_id === currentUserId) {
+        return;
+      }
 
-    if (lastAutoReadMessageIdRef.current === latest.id) {
-      return;
-    }
+      if (lastAutoReadMessageIdRef.current === latest.id) {
+        console.log('[ChatRoom] Already marked as read:', latest.id);
+        return;
+      }
 
-    lastAutoReadMessageIdRef.current = latest.id;
-    markConversationRead(activeConversationId).catch(() => {});
+      console.log('[ChatRoom] Marking conversation read for message:', latest.id);
+      lastAutoReadMessageIdRef.current = latest.id;
+      markConversationRead(activeConversationId).catch((err) => {
+        console.error('[ChatRoom] Error marking read:', err);
+      });
+    } catch (err) {
+      console.error('[ChatRoom] Error in auto-read effect:', err);
+    }
   }, [
     activeConversationId,
     currentUserId,

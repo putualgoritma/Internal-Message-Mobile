@@ -48,10 +48,18 @@ export function useRealtime(): void {
       userId,
       callbacks: {
         onIncomingMessage: (message: ChatMessage) => {
-          if (message.sender_id != null && message.sender_id !== userId) {
-            playIncomingMessageSound();
+          try {
+            console.log('[Realtime] onIncomingMessage called for message:', message.id);
+            if (message.sender_id != null && message.sender_id !== userId) {
+              console.log('[Realtime] Playing sound for message from sender:', message.sender_id);
+              playIncomingMessageSound();
+            }
+            console.log('[Realtime] Upserting message to store');
+            useChatStore.getState().upsertIncomingMessage(message);
+            console.log('[Realtime] Message upserted');
+          } catch (error) {
+            console.error('[Realtime] Error handling incoming message:', error);
           }
-          useChatStore.getState().upsertIncomingMessage(message);
         },
         onIncomingNotification: (notification: NotificationItem) => {
           useNotificationStore
