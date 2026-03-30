@@ -10,6 +10,14 @@ export interface User {
 
 export type MessageType = 'text' | 'system' | 'action' | string;
 
+export interface ActionMetadata {
+  actions: Array<{
+    label: string;
+    method: string;
+    endpoint: string;
+  }>;
+}
+
 export interface ChatMessage {
   id: number;
   conversation_id: number;
@@ -21,6 +29,7 @@ export interface ChatMessage {
     id: number;
     name: string;
   };
+  metadata?: ActionMetadata | Record<string, unknown>;
 }
 
 export interface Conversation {

@@ -113,6 +113,20 @@ export const chatApi = {
     );
   },
 
+  async executeAction(endpoint: string, method: string = 'POST'): Promise<void> {
+    if (method.toUpperCase() === 'POST') {
+      await apiClient.post(endpoint);
+    } else if (method.toUpperCase() === 'GET') {
+      await apiClient.get(endpoint);
+    } else if (method.toUpperCase() === 'PUT') {
+      await apiClient.put(endpoint);
+    } else if (method.toUpperCase() === 'DELETE') {
+      await apiClient.delete(endpoint);
+    } else {
+      throw new Error(`Unsupported HTTP method: ${method}`);
+    }
+  },
+
   async getUnreadConversation(conversationId: number): Promise<number> {
     const response = await apiClient.get(`/close/internal-ops/unread-total`);
     const payload = unwrapApiPayload<unknown>(response.data);

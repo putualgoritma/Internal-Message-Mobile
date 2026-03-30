@@ -1,7 +1,8 @@
-import React from 'react';
-import {StyleSheet, Text, View} from 'react-native';
+import React, {useState} from 'react';
+import {ActivityIndicator, Pressable, StyleSheet, Text, View} from 'react-native';
 
 import type {ChatMessage} from '../types/models';
+import {chatApi} from '../api/chatApi';
 import {colors} from '../theme/colors';
 
 interface ChatBubbleProps {
@@ -22,12 +23,61 @@ function formatTime(value: string): string {
 }
 
 export function ChatBubble({message, isOwn}: ChatBubbleProps): React.JSX.Element {
-  const isSystem = message.type === 'system' || message.type === 'action';
+  const [actionLoading, setActionLoading] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  const isSystem = message.type === 'system';
+  const isAction = message.type === 'action';
 
   if (isSystem) {
     return (
       <View style={styles.systemWrap}>
         <Text style={styles.systemText}>{message.content}</Text>
+      </View>
+    );
+  }
+
+  if (isAction) {
+    const metadata = message.metadata as {actions?: Array<{label: string; endpoint: string; method?: string}>} | undefined;
+    const actions = metadata?.actions ?? [];
+
+    const handleActionPress = async (endpoint: string, method?: string) => {
+      setActionLoading(endpoint);
+      setActionError(null);
+      try {
+        await chatApi.executeAction(endpoint, method ?? 'POST');
+      } catch (error) {
+        setActionError(error instanceof Error ? error.message : 'Action failed');
+      } finally {
+        setActionLoading(null);
+      }
+    };
+
+    return (
+      <View style={[styles.row, styles.rowOther]}>
+        <View style={styles.actionBubble}>
+          <Text style={styles.actionContent}>{message.content}</Text>
+          {actionError && <Text style={styles.actionErrorText}>{actionError}</Text>}
+          <View style={styles.actionsContainer}>
+            {actions.map((action, index) => (
+              <Pressable
+                key={index}
+                disabled={actionLoading !== null}
+                onPress={() => handleActionPress(action.endpoint, action.method)}
+                style={[
+                  styles.actionButton,
+                  actionLoading === action.endpoint && styles.actionButtonLoading,
+                ]}>
+                {actionLoading === action.endpoint ? (
+                  <ActivityIndicator size="small" color={colors.brand} />
+                ) : (
+                  <Text style={styles.actionButtonLabel}>{action.label}</Text>
+                )}
+              </Pressable>
+            ))}
+          </View>
+          <Text style={styles.actionTime}>{formatTime(message.created_at)}</Text>
+        </View>
       </View>
     );
   }
@@ -101,5 +151,49 @@ const styles = StyleSheet.create({
     paddingHorizontal: 10,
     paddingVertical: 5,
     textAlign: 'center',
+  },
+  actionBubble: {
+    backgroundColor: '#F0F4F9',
+    borderColor: colors.border,
+    borderRadius: 12,
+    borderWidth: 1,
+    maxWidth: '85%',
+    padding: 12,
+  },
+  actionContent: {
+    color: colors.textPrimary,
+    fontSize: 14,
+    marginBottom: 12,
+  },
+  actionErrorText: {
+    color: '#E53935',
+    fontSize: 12,
+    marginBottom: 8,
+  },
+  actionsContainer: {
+    gap: 8,
+    marginBottom: 8,
+  },
+  actionButton: {
+    alignItems: 'center',
+    backgroundColor: colors.brand,
+    borderRadius: 8,
+    justifyContent: 'center',
+    minHeight: 36,
+    paddingHorizontal: 12,
+  },
+  actionButtonLoading: {
+    opacity: 0.7,
+  },
+  actionButtonLabel: {
+    color: '#FFFFFF',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  actionTime: {
+    color: colors.textSecondary,
+    fontSize: 10,
+    marginTop: 4,
+    textAlign: 'right',
   },
 });
