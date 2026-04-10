@@ -58,6 +58,49 @@ function asString(value: unknown, fallback = ''): string {
   return fallback;
 }
 
+function normalizeMessageType(value: unknown): string {
+  const raw = asString(value, 'text').trim().toLowerCase();
+
+  if (raw === 'action' || raw === 'action_required' || raw === 'action-required') {
+    return 'action';
+  }
+
+  if (raw === 'system' || raw === 'info') {
+    return 'system';
+  }
+
+  return raw || 'text';
+}
+
+function normalizeMessageContent(
+  value: unknown,
+  type: string,
+  metadata?: Record<string, unknown>,
+): string {
+  const raw = asString(value, '').trim();
+  const looksLikePlaceholder = /^there is no message\.?$/i.test(raw);
+
+  if (raw && !looksLikePlaceholder) {
+    return raw;
+  }
+
+  const fromMetadata = [
+    metadata?.message,
+    metadata?.title,
+    metadata?.text,
+    metadata?.prompt,
+    metadata?.description,
+  ]
+    .map(item => asString(item, '').trim())
+    .find(Boolean);
+
+  if (fromMetadata) {
+    return fromMetadata;
+  }
+
+  return type === 'action' ? 'Action required' : raw;
+}
+
 function asNumber(value: unknown, fallback = 0): number {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
@@ -106,10 +149,14 @@ export function normalizeMessagePayload(payload: unknown): ChatMessage | null {
     0,
   );
 
-  const content = asString(
+  const type = normalizeMessageType(candidate.type ?? candidate.message_type);
+  const metadata = asObject(candidate.metadata);
+  const content = normalizeMessageContent(
     candidate.content ?? candidate.body ?? candidate.text ?? candidate.message,
-    '',
-  ).trim();
+    type,
+    metadata ?? undefined,
+  );
+
   if (conversationId <= 0 || !content) {
     return null;
   }
@@ -121,9 +168,10 @@ export function normalizeMessagePayload(payload: unknown): ChatMessage | null {
     id,
     conversation_id: conversationId,
     sender_id: senderIdRaw === null ? null : asNumber(senderIdRaw, 0),
-    type: asString(candidate.type, 'text'),
+    type,
     content,
     created_at: asString(candidate.created_at ?? candidate.createdAt, new Date().toISOString()),
+    metadata: metadata ?? undefined,
     sender: asObject(candidate.sender)
       ? {
           id: asNumber((candidate.sender as Record<string, unknown>).id, 0),

@@ -9,13 +9,87 @@ interface SendMessageInput {
   type?: 'text' | 'system' | 'action';
 }
 
+function parseMetadata(value: unknown): Record<string, unknown> | undefined {
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+
+  try {
+    const parsed = JSON.parse(value);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+  } catch {
+    // Ignore invalid JSON metadata and keep original payload untouched.
+  }
+
+  return undefined;
+}
+
+function normalizeMessageType(value: unknown): ChatMessage['type'] {
+  const raw = String(value ?? 'text').trim().toLowerCase();
+
+  if (raw === 'action' || raw === 'action_required' || raw === 'action-required') {
+    return 'action';
+  }
+
+  if (raw === 'system' || raw === 'info') {
+    return 'system';
+  }
+
+  if (!raw) {
+    return 'text';
+  }
+
+  return raw;
+}
+
+function pickMessageText(
+  value: unknown,
+  type: ChatMessage['type'],
+  metadata?: Record<string, unknown>,
+): string {
+  const raw = String(value ?? '').trim();
+  const looksLikePlaceholder = /^there is no message\.?$/i.test(raw);
+  if (raw && !looksLikePlaceholder) {
+    return raw;
+  }
+
+  const fromMetadata = [
+    metadata?.message,
+    metadata?.title,
+    metadata?.text,
+    metadata?.prompt,
+    metadata?.description,
+  ]
+    .map(item => (typeof item === 'string' ? item.trim() : ''))
+    .find(Boolean);
+
+  if (fromMetadata) {
+    return fromMetadata;
+  }
+
+  return type === 'action' ? 'Action required' : raw;
+}
+
 function normalizeMessage(input: ChatMessage): ChatMessage {
   const asRecord = input as ChatMessage & {
     message_type?: ChatMessage['type'];
     sender_name?: string;
+    metadata?: unknown;
   };
 
-  const normalizedType = asRecord.type ?? asRecord.message_type;
+  const normalizedType = normalizeMessageType(asRecord.type ?? asRecord.message_type);
+  const normalizedMetadata = parseMetadata(asRecord.metadata) ?? asRecord.metadata;
+  const normalizedContent = pickMessageText(
+    asRecord.content,
+    normalizedType,
+    normalizedMetadata as Record<string, unknown> | undefined,
+  );
   const normalizedSender =
     asRecord.sender ??
     (asRecord.sender_id != null && asRecord.sender_name
@@ -25,11 +99,18 @@ function normalizeMessage(input: ChatMessage): ChatMessage {
         }
       : undefined);
 
-  if (normalizedType !== asRecord.type || normalizedSender !== asRecord.sender) {
+  if (
+    normalizedType !== asRecord.type ||
+    normalizedSender !== asRecord.sender ||
+    normalizedContent !== asRecord.content ||
+    normalizedMetadata !== asRecord.metadata
+  ) {
     return {
       ...asRecord,
-      type: normalizedType ?? 'text',
+      type: normalizedType,
+      content: normalizedContent,
       sender: normalizedSender,
+      metadata: normalizedMetadata,
     };
   }
 
@@ -44,7 +125,20 @@ function normalizeConversation(input: Conversation): Conversation {
   const last = input.last_message as ChatMessage & {
     message_type?: ChatMessage['type'];
   };
-  if (last.type || !last.message_type) {
+  const normalizedType = normalizeMessageType(last.type ?? last.message_type);
+  const normalizedMetadata = parseMetadata(last.metadata) ?? last.metadata;
+  const normalizedContent = pickMessageText(
+    last.content,
+    normalizedType,
+    normalizedMetadata as Record<string, unknown> | undefined,
+  );
+
+  const hasChange =
+    normalizedType !== last.type ||
+    normalizedContent !== last.content ||
+    normalizedMetadata !== last.metadata;
+
+  if (!hasChange) {
     return input;
   }
 
@@ -52,7 +146,9 @@ function normalizeConversation(input: Conversation): Conversation {
     ...input,
     last_message: {
       ...last,
-      type: last.message_type,
+      type: normalizedType,
+      content: normalizedContent,
+      metadata: normalizedMetadata,
     },
   };
 }
@@ -77,6 +173,42 @@ function normalizeList<T>(payload: unknown): T[] {
   }
 
   return [];
+}
+
+function resolveActionUrl(endpoint: string): string {
+  const trimmed = endpoint.trim();
+  if (!trimmed) {
+    return trimmed;
+  }
+
+  if (/^https?:\/\//i.test(trimmed)) {
+    return trimmed;
+  }
+
+  const base = apiClient.defaults.baseURL ?? '';
+  if (!base) {
+    return trimmed;
+  }
+
+  try {
+    const baseUrl = new URL(base);
+
+    if (/^\/?api\//i.test(trimmed)) {
+      return new URL(trimmed.replace(/^\/?/, '/'), baseUrl.origin).toString();
+    }
+
+    if (trimmed.startsWith('/')) {
+      return new URL(trimmed, baseUrl.origin).toString();
+    }
+  } catch {
+    // Fall back to generic URL resolution below.
+  }
+
+  try {
+    return new URL(trimmed, base.endsWith('/') ? base : `${base}/`).toString();
+  } catch {
+    return `${base.replace(/\/$/, '')}/${trimmed.replace(/^\//, '')}`;
+  }
 }
 
 export const chatApi = {
@@ -114,17 +246,33 @@ export const chatApi = {
   },
 
   async executeAction(endpoint: string, method: string = 'POST'): Promise<void> {
-    if (method.toUpperCase() === 'POST') {
-      await apiClient.post(endpoint);
-    } else if (method.toUpperCase() === 'GET') {
-      await apiClient.get(endpoint);
-    } else if (method.toUpperCase() === 'PUT') {
-      await apiClient.put(endpoint);
-    } else if (method.toUpperCase() === 'DELETE') {
-      await apiClient.delete(endpoint);
-    } else {
-      throw new Error(`Unsupported HTTP method: ${method}`);
+    const normalizedMethod = method.toUpperCase();
+    const resolvedUrl = resolveActionUrl(endpoint);
+
+    console.log(
+      `[Action] executeAction ${normalizedMethod} raw="${endpoint}" resolved="${resolvedUrl}"`,
+    );
+
+    try {
+      if (normalizedMethod === 'POST') {
+        await apiClient.post(resolvedUrl);
+      } else if (normalizedMethod === 'GET') {
+        await apiClient.get(resolvedUrl);
+      } else if (normalizedMethod === 'PUT') {
+        await apiClient.put(resolvedUrl);
+      } else if (normalizedMethod === 'DELETE') {
+        await apiClient.delete(resolvedUrl);
+      } else {
+        throw new Error(`Unsupported HTTP method: ${method}`);
+      }
+    } catch (error) {
+      console.error(
+        `[Action] executeAction failed ${normalizedMethod} resolved="${resolvedUrl}"`,
+        error,
+      );
+      throw error;
     }
+
   },
 
   async getUnreadConversation(conversationId: number): Promise<number> {

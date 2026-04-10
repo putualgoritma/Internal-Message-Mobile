@@ -20,6 +20,34 @@ interface ChatState {
   upsertIncomingMessage: (message: ChatMessage) => void;
 }
 
+function toFallbackMessage(conversation: Conversation): ChatMessage | null {
+  const last = conversation.last_message;
+  if (!last) {
+    return null;
+  }
+
+  const createdAt =
+    typeof last.created_at === 'string' && last.created_at.trim()
+      ? last.created_at
+      : conversation.updated_at ?? new Date().toISOString();
+
+  return {
+    id: Number(last.id ?? Date.now()),
+    conversation_id: conversation.id,
+    sender_id:
+      typeof last.sender_id === 'number'
+        ? last.sender_id
+        : last.sender && typeof last.sender.id === 'number'
+          ? last.sender.id
+          : null,
+    type: (last.type ?? 'text') as ChatMessage['type'],
+    content: String(last.content ?? '').trim(),
+    created_at: createdAt,
+    sender: last.sender,
+    metadata: last.metadata,
+  };
+}
+
 function toConversationUnreadMap(
   conversations: Conversation[],
 ): Record<number, number> {
@@ -120,7 +148,22 @@ export const useChatStore = create<ChatState>((set, get) => ({
         },
       }));
     } catch (error) {
-      set({error: toErrorMessage(error)});
+      const fallbackConversation = get().conversations.find(
+        item => item.id === conversationId,
+      );
+      const fallbackMessage = fallbackConversation
+        ? toFallbackMessage(fallbackConversation)
+        : null;
+
+      set(state => ({
+        error: toErrorMessage(error),
+        messagesByConversation: fallbackMessage
+          ? {
+              ...state.messagesByConversation,
+              [conversationId]: sortByCreatedAt([fallbackMessage]),
+            }
+          : state.messagesByConversation,
+      }));
     } finally {
       set({loadingMessages: false});
     }

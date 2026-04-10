@@ -10,6 +10,17 @@ interface ChatBubbleProps {
   isOwn: boolean;
 }
 
+interface ActionButtonData {
+  label: string;
+  endpoint: string;
+  method?: string;
+}
+
+function isRejectAction(action: ActionButtonData): boolean {
+  const text = `${action.label} ${action.endpoint}`.toLowerCase();
+  return /reject|decline|deny|disapprove|cancel/.test(text);
+}
+
 function formatTime(value: string): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) {
@@ -26,8 +37,12 @@ export function ChatBubble({message, isOwn}: ChatBubbleProps): React.JSX.Element
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
 
-  const isSystem = message.type === 'system';
-  const isAction = message.type === 'action';
+  const normalizedType = String(message.type ?? 'text').trim().toLowerCase();
+  const isSystem = normalizedType === 'system';
+  const isAction =
+    normalizedType === 'action' ||
+    normalizedType === 'action_required' ||
+    normalizedType === 'action-required';
 
   if (isSystem) {
     return (
@@ -38,10 +53,77 @@ export function ChatBubble({message, isOwn}: ChatBubbleProps): React.JSX.Element
   }
 
   if (isAction) {
-    const metadata = message.metadata as {actions?: Array<{label: string; endpoint: string; method?: string}>} | undefined;
-    const actions = metadata?.actions ?? [];
+    const metadata =
+      message.metadata && typeof message.metadata === 'object' && !Array.isArray(message.metadata)
+        ? (message.metadata as Record<string, unknown>)
+        : undefined;
+    const rawActions =
+      (Array.isArray(metadata?.actions) ? metadata?.actions : undefined) ??
+      (Array.isArray(metadata?.buttons) ? metadata?.buttons : undefined) ??
+      (Array.isArray(metadata?.options) ? metadata?.options : undefined) ??
+      [];
+    const actions: ActionButtonData[] = rawActions
+      .map((item): ActionButtonData | null => {
+        if (!item || typeof item !== 'object') {
+          return null;
+        }
+
+        const data = item as Record<string, unknown>;
+        const label =
+          typeof data.label === 'string'
+            ? data.label.trim()
+            : typeof data.title === 'string'
+              ? data.title.trim()
+              : typeof data.text === 'string'
+                ? data.text.trim()
+                : '';
+        const endpoint =
+          typeof data.endpoint === 'string'
+            ? data.endpoint.trim()
+            : typeof data.url === 'string'
+              ? data.url.trim()
+              : typeof data.path === 'string'
+                ? data.path.trim()
+                : '';
+        const method =
+          typeof data.method === 'string'
+            ? data.method
+            : typeof data.http_method === 'string'
+              ? data.http_method
+              : undefined;
+
+        if (!label || !endpoint) {
+          return null;
+        }
+
+        return {label, endpoint, method};
+      })
+      .filter((item): item is ActionButtonData => item !== null);
+    const isTwoActions = actions.length === 2;
+
+    const contentText = (() => {
+      const raw = String(message.content ?? '').trim();
+      if (raw && !/^there is no message\.?$/i.test(raw)) {
+        return raw;
+      }
+
+      const fromMetadata = [
+        metadata?.message,
+        metadata?.title,
+        metadata?.text,
+        metadata?.prompt,
+        metadata?.description,
+      ]
+        .map(item => (typeof item === 'string' ? item.trim() : ''))
+        .find(Boolean);
+
+      return fromMetadata || 'Action required';
+    })();
 
     const handleActionPress = async (endpoint: string, method?: string) => {
+      console.log(
+        `[Action] button tap method="${(method ?? 'POST').toUpperCase()}" endpoint="${endpoint}"`,
+      );
       setActionLoading(endpoint);
       setActionError(null);
       try {
@@ -56,9 +138,13 @@ export function ChatBubble({message, isOwn}: ChatBubbleProps): React.JSX.Element
     return (
       <View style={[styles.row, styles.rowOther]}>
         <View style={styles.actionBubble}>
-          <Text style={styles.actionContent}>{message.content}</Text>
+          <Text style={styles.actionContent}>{contentText}</Text>
           {actionError && <Text style={styles.actionErrorText}>{actionError}</Text>}
-          <View style={styles.actionsContainer}>
+          <View
+            style={[
+              styles.actionsContainer,
+              isTwoActions && styles.actionsContainerTwo,
+            ]}>
             {actions.map((action, index) => (
               <Pressable
                 key={index}
@@ -66,12 +152,25 @@ export function ChatBubble({message, isOwn}: ChatBubbleProps): React.JSX.Element
                 onPress={() => handleActionPress(action.endpoint, action.method)}
                 style={[
                   styles.actionButton,
+                  isTwoActions && styles.actionButtonTwo,
+                  isTwoActions && index === 0 && styles.actionButtonTwoLeft,
+                  isTwoActions && index === 1 && styles.actionButtonTwoRight,
+                  isRejectAction(action) && styles.actionButtonDanger,
                   actionLoading === action.endpoint && styles.actionButtonLoading,
                 ]}>
                 {actionLoading === action.endpoint ? (
-                  <ActivityIndicator size="small" color={colors.brand} />
+                  <ActivityIndicator
+                    size="small"
+                    color={isRejectAction(action) ? colors.danger : '#FFFFFF'}
+                  />
                 ) : (
-                  <Text style={styles.actionButtonLabel}>{action.label}</Text>
+                  <Text
+                    style={[
+                      styles.actionButtonLabel,
+                      isRejectAction(action) && styles.actionButtonLabelDanger,
+                    ]}>
+                    {action.label}
+                  </Text>
                 )}
               </Pressable>
             ))}
@@ -171,16 +270,39 @@ const styles = StyleSheet.create({
     marginBottom: 8,
   },
   actionsContainer: {
-    gap: 8,
+    flexDirection: 'row',
+    flexWrap: 'wrap',
     marginBottom: 8,
+  },
+  actionsContainerTwo: {
+    flexWrap: 'nowrap',
+    width: '100%',
   },
   actionButton: {
     alignItems: 'center',
     backgroundColor: colors.brand,
     borderRadius: 8,
     justifyContent: 'center',
+    marginBottom: 8,
     minHeight: 36,
+    minWidth: 120,
     paddingHorizontal: 12,
+  },
+  actionButtonTwo: {
+    flex: 1,
+    minWidth: 0,
+    marginBottom: 0,
+  },
+  actionButtonTwoLeft: {
+    marginRight: 4,
+  },
+  actionButtonTwoRight: {
+    marginLeft: 4,
+  },
+  actionButtonDanger: {
+    backgroundColor: '#FFFFFF',
+    borderColor: colors.danger,
+    borderWidth: 1,
   },
   actionButtonLoading: {
     opacity: 0.7,
@@ -189,6 +311,9 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     fontSize: 13,
     fontWeight: '600',
+  },
+  actionButtonLabelDanger: {
+    color: colors.danger,
   },
   actionTime: {
     color: colors.textSecondary,
