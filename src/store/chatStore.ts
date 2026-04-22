@@ -141,6 +141,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     try {
       const messages = await chatApi.getMessages(conversationId);
+      console.log(
+        `[fetchMessages] conv=${conversationId} count=${messages.length}`,
+        messages.map(m => ({id: m.id, type: m.type, status: m.status, metadata_status: (m.metadata as Record<string,unknown>)?.status})),
+      );
       set(state => ({
         messagesByConversation: {
           ...state.messagesByConversation,
@@ -191,24 +195,37 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   markConversationRead: async (conversationId: number) => {
+    // Optimistically clear badge immediately — don't wait for API
+    useUnreadStore.getState().setConversationUnread(conversationId, 0);
+    set(state => ({
+      conversations: state.conversations.map(item =>
+        item.id === conversationId ? {...item, unread_count: 0} : item,
+      ),
+    }));
+
     try {
       await chatApi.markConversationRead(conversationId);
-      useUnreadStore.getState().setConversationUnread(conversationId, 0);
-
-      set(state => ({
-        conversations: state.conversations.map(item =>
-          item.id === conversationId ? {...item, unread_count: 0} : item,
-        ),
-      }));
     } catch (error) {
       set({error: toErrorMessage(error)});
     }
   },
 
   upsertIncomingMessage: (message: ChatMessage) => {
-    // Quick duplicate check before acquiring lock
     const snapshot = get().messagesByConversation[message.conversation_id] ?? [];
+
+    // If message already exists, update it in-place (e.g. status changed to 'closed')
     if (messageExists(snapshot, message.id)) {
+      set(state => {
+        const conversationId = message.conversation_id;
+        const current = state.messagesByConversation[conversationId] ?? [];
+        const updated = current.map(m => (m.id === message.id ? {...m, ...message} : m));
+        return {
+          messagesByConversation: {
+            ...state.messagesByConversation,
+            [conversationId]: updated,
+          },
+        };
+      });
       return;
     }
 

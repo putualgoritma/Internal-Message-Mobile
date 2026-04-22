@@ -14,6 +14,7 @@ interface ActionButtonData {
   label: string;
   endpoint: string;
   method?: string;
+  payload?: Record<string, unknown>;
 }
 
 function isRejectAction(action: ActionButtonData): boolean {
@@ -36,6 +37,7 @@ function formatTime(value: string): string {
 export function ChatBubble({message, isOwn}: ChatBubbleProps): React.JSX.Element {
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [actionDone, setActionDone] = useState(false);
 
   const normalizedType = String(message.type ?? 'text').trim().toLowerCase();
   const isSystem = normalizedType === 'system';
@@ -91,15 +93,29 @@ export function ChatBubble({message, isOwn}: ChatBubbleProps): React.JSX.Element
             : typeof data.http_method === 'string'
               ? data.http_method
               : undefined;
+        const payload =
+          data.payload && typeof data.payload === 'object' && !Array.isArray(data.payload)
+            ? (data.payload as Record<string, unknown>)
+            : undefined;
 
         if (!label || !endpoint) {
           return null;
         }
 
-        return {label, endpoint, method};
+        return {label, endpoint, method, payload};
       })
       .filter((item): item is ActionButtonData => item !== null);
     const isTwoActions = actions.length === 2;
+
+    // Show action buttons only while status is pending.
+    const rawActionStatus =
+      typeof message.status === 'string'
+        ? message.status.trim()
+        : typeof metadata?.status === 'string'
+          ? String(metadata.status).trim()
+          : '';
+    const actionStatus = rawActionStatus.toLowerCase();
+    const shouldShowActions = !actionDone && actionStatus === 'pending';
 
     const contentText = (() => {
       const raw = String(message.content ?? '').trim();
@@ -120,14 +136,16 @@ export function ChatBubble({message, isOwn}: ChatBubbleProps): React.JSX.Element
       return fromMetadata || 'Action required';
     })();
 
-    const handleActionPress = async (endpoint: string, method?: string) => {
+    const handleActionPress = async (endpoint: string, method?: string, payload?: Record<string, unknown>) => {
       console.log(
         `[Action] button tap method="${(method ?? 'POST').toUpperCase()}" endpoint="${endpoint}"`,
       );
       setActionLoading(endpoint);
       setActionError(null);
       try {
-        await chatApi.executeAction(endpoint, method ?? 'POST');
+        await chatApi.executeAction(endpoint, method ?? 'POST', payload);
+        chatApi.recordActionClick(message.id).catch(() => {});
+        setActionDone(true);
       } catch (error) {
         setActionError(error instanceof Error ? error.message : 'Action failed');
       } finally {
@@ -140,41 +158,47 @@ export function ChatBubble({message, isOwn}: ChatBubbleProps): React.JSX.Element
         <View style={styles.actionBubble}>
           <Text style={styles.actionContent}>{contentText}</Text>
           {actionError && <Text style={styles.actionErrorText}>{actionError}</Text>}
-          <View
-            style={[
-              styles.actionsContainer,
-              isTwoActions && styles.actionsContainerTwo,
-            ]}>
-            {actions.map((action, index) => (
-              <Pressable
-                key={index}
-                disabled={actionLoading !== null}
-                onPress={() => handleActionPress(action.endpoint, action.method)}
-                style={[
-                  styles.actionButton,
-                  isTwoActions && styles.actionButtonTwo,
-                  isTwoActions && index === 0 && styles.actionButtonTwoLeft,
-                  isTwoActions && index === 1 && styles.actionButtonTwoRight,
-                  isRejectAction(action) && styles.actionButtonDanger,
-                  actionLoading === action.endpoint && styles.actionButtonLoading,
-                ]}>
-                {actionLoading === action.endpoint ? (
-                  <ActivityIndicator
-                    size="small"
-                    color={isRejectAction(action) ? colors.danger : '#FFFFFF'}
-                  />
-                ) : (
-                  <Text
-                    style={[
-                      styles.actionButtonLabel,
-                      isRejectAction(action) && styles.actionButtonLabelDanger,
-                    ]}>
-                    {action.label}
-                  </Text>
-                )}
-              </Pressable>
-            ))}
-          </View>
+          {shouldShowActions ? (
+            <View
+              style={[
+                styles.actionsContainer,
+                isTwoActions && styles.actionsContainerTwo,
+              ]}>
+              {actions.map((action, index) => (
+                <Pressable
+                  key={index}
+                  disabled={actionLoading !== null}
+                  onPress={() => handleActionPress(action.endpoint, action.method, action.payload)}
+                  style={[
+                    styles.actionButton,
+                    isTwoActions && styles.actionButtonTwo,
+                    isTwoActions && index === 0 && styles.actionButtonTwoLeft,
+                    isTwoActions && index === 1 && styles.actionButtonTwoRight,
+                    isRejectAction(action) && styles.actionButtonDanger,
+                    actionLoading === action.endpoint && styles.actionButtonLoading,
+                  ]}>
+                  {actionLoading === action.endpoint ? (
+                    <ActivityIndicator
+                      size="small"
+                      color={isRejectAction(action) ? colors.danger : '#FFFFFF'}
+                    />
+                  ) : (
+                    <Text
+                      style={[
+                        styles.actionButtonLabel,
+                        isRejectAction(action) && styles.actionButtonLabelDanger,
+                      ]}>
+                      {action.label}
+                    </Text>
+                  )}
+                </Pressable>
+              ))}
+            </View>
+          ) : (
+            <Text style={styles.actionClosedText}>
+              {`Request has been processed. Status: ${rawActionStatus || 'unknown'}`}
+            </Text>
+          )}
           <Text style={styles.actionTime}>{formatTime(message.created_at)}</Text>
         </View>
       </View>
@@ -268,6 +292,13 @@ const styles = StyleSheet.create({
     color: '#E53935',
     fontSize: 12,
     marginBottom: 8,
+  },
+  actionClosedText: {
+    color: '#E53935',
+    fontSize: 13,
+    fontStyle: 'italic',
+    marginTop: 4,
+    marginBottom: 4,
   },
   actionsContainer: {
     flexDirection: 'row',

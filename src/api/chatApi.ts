@@ -185,30 +185,26 @@ function resolveActionUrl(endpoint: string): string {
     return trimmed;
   }
 
-  const base = apiClient.defaults.baseURL ?? '';
+  const base = (apiClient.defaults.baseURL ?? '').replace(/\/$/, '');
   if (!base) {
     return trimmed;
   }
 
-  try {
-    const baseUrl = new URL(base);
+  // Strip leading slash from endpoint
+  const path = trimmed.replace(/^\//, '');
 
-    if (/^\/?api\//i.test(trimmed)) {
-      return new URL(trimmed.replace(/^\/?/, '/'), baseUrl.origin).toString();
-    }
+  // If the endpoint starts with the same path segment as the base URL path
+  // (e.g. base ends in "/api" and endpoint starts with "api/..."), strip the duplicate.
+  // This prevents double segments like /api/api/...
+  const basePathSegment = base.split('/').pop() ?? ''; // e.g. "api"
+  const deduped =
+    basePathSegment &&
+    (path.toLowerCase() === basePathSegment.toLowerCase() ||
+      path.toLowerCase().startsWith(basePathSegment.toLowerCase() + '/'))
+      ? path.slice(basePathSegment.length).replace(/^\//, '')
+      : path;
 
-    if (trimmed.startsWith('/')) {
-      return new URL(trimmed, baseUrl.origin).toString();
-    }
-  } catch {
-    // Fall back to generic URL resolution below.
-  }
-
-  try {
-    return new URL(trimmed, base.endsWith('/') ? base : `${base}/`).toString();
-  } catch {
-    return `${base.replace(/\/$/, '')}/${trimmed.replace(/^\//, '')}`;
-  }
+  return `${base}/${deduped}`;
 }
 
 export const chatApi = {
@@ -245,23 +241,28 @@ export const chatApi = {
     );
   },
 
-  async executeAction(endpoint: string, method: string = 'POST'): Promise<void> {
+  async recordActionClick(messageId: number): Promise<void> {
+    await apiClient.post(`/close/internal-ops/messages/${messageId}/action-click`);
+  },
+
+  async executeAction(endpoint: string, method: string = 'POST', payload?: Record<string, unknown>): Promise<void> {
     const normalizedMethod = method.toUpperCase();
     const resolvedUrl = resolveActionUrl(endpoint);
 
     console.log(
       `[Action] executeAction ${normalizedMethod} raw="${endpoint}" resolved="${resolvedUrl}"`,
+      payload ?? {},
     );
 
     try {
       if (normalizedMethod === 'POST') {
-        await apiClient.post(resolvedUrl);
+        await apiClient.post(resolvedUrl, payload ?? {});
       } else if (normalizedMethod === 'GET') {
-        await apiClient.get(resolvedUrl);
+        await apiClient.get(resolvedUrl, {params: payload});
       } else if (normalizedMethod === 'PUT') {
-        await apiClient.put(resolvedUrl);
+        await apiClient.put(resolvedUrl, payload ?? {});
       } else if (normalizedMethod === 'DELETE') {
-        await apiClient.delete(resolvedUrl);
+        await apiClient.delete(resolvedUrl, {data: payload});
       } else {
         throw new Error(`Unsupported HTTP method: ${method}`);
       }

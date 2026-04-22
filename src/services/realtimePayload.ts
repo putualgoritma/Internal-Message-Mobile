@@ -170,6 +170,7 @@ export function normalizeMessagePayload(payload: unknown): ChatMessage | null {
     sender_id: senderIdRaw === null ? null : asNumber(senderIdRaw, 0),
     type,
     content,
+    status: candidate.status !== undefined ? asString(candidate.status, '') || undefined : undefined,
     created_at: asString(candidate.created_at ?? candidate.createdAt, new Date().toISOString()),
     metadata: metadata ?? undefined,
     sender: asObject(candidate.sender)

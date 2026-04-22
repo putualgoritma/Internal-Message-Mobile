@@ -6,8 +6,10 @@ import {APP_CONFIG} from './src/config/appConfig';
 import {AppNavigator} from './src/navigation/AppNavigator';
 import {navigate} from './src/navigation/NavigationService';
 import {initializePush, setPushIdentity} from './src/services/pushService';
+import {setBadgeCount} from './src/services/badgeService';
 import {useRealtime} from './src/hooks/useRealtime';
 import {useAuthStore} from './src/store/authStore';
+import {useUnreadStore} from './src/store/unreadStore';
 import {colors} from './src/theme/colors';
 
 function AppBootstrap(): React.JSX.Element {
@@ -15,8 +17,13 @@ function AppBootstrap(): React.JSX.Element {
   const bootstrapSession = useAuthStore(state => state.bootstrapSession);
   const userId = useAuthStore(state => state.user?.id);
   const isAuthenticated = useAuthStore(state => state.isAuthenticated);
+  const totalChatUnread = useUnreadStore(state => state.totalChatUnread);
 
   useRealtime();
+
+  useEffect(() => {
+    setBadgeCount(totalChatUnread);
+  }, [totalChatUnread]);
 
   useEffect(() => {
     LogBox.ignoreLogs([

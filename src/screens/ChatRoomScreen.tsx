@@ -24,6 +24,65 @@ import {useAuthStore} from '../store/authStore';
 import {useChatStore} from '../store/chatStore';
 import type {ChatMessage} from '../types/models';
 
+interface DateSeparator {
+  kind: '__date_separator__';
+  id: string;
+  label: string;
+}
+
+type ListItem = ChatMessage | DateSeparator;
+
+function parseDate(dateStr: string): Date {
+  // Handle "YYYY-MM-DD HH:MM:SS" (no T, no timezone) from backend
+  const normalized = dateStr.replace(' ', 'T');
+  return new Date(normalized);
+}
+
+function getDateLabel(dateStr: string): string {
+  const date = parseDate(dateStr);
+  if (Number.isNaN(date.getTime())) {
+    return '';
+  }
+  const today = new Date();
+  const yesterday = new Date(today);
+  yesterday.setDate(today.getDate() - 1);
+
+  const sameDay = (a: Date, b: Date) =>
+    a.getFullYear() === b.getFullYear() &&
+    a.getMonth() === b.getMonth() &&
+    a.getDate() === b.getDate();
+
+  if (sameDay(date, today)) {
+    return 'Today';
+  }
+  if (sameDay(date, yesterday)) {
+    return 'Yesterday';
+  }
+  return date.toLocaleDateString(undefined, {day: 'numeric', month: 'long', year: 'numeric'});
+}
+
+function getDayKey(dateStr: string): string {
+  const date = parseDate(dateStr);
+  if (Number.isNaN(date.getTime())) {
+    return dateStr;
+  }
+  return `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
+}
+
+function injectDateSeparators(messages: ChatMessage[]): ListItem[] {
+  const result: ListItem[] = [];
+  let lastDayKey = '';
+  for (const msg of messages) {
+    const dayKey = getDayKey(msg.created_at);
+    if (dayKey !== lastDayKey) {
+      lastDayKey = dayKey;
+      result.push({kind: '__date_separator__', id: `sep-${dayKey}`, label: getDateLabel(msg.created_at)});
+    }
+    result.push(msg);
+  }
+  return result;
+}
+
 type ChatRoomRouteProp = RouteProp<RootStackParamList, 'ChatRoom'>;
 
 interface ChatRoomScreenProps {
@@ -82,10 +141,12 @@ export function ChatRoomScreen({route}: ChatRoomScreenProps): React.JSX.Element 
     [messagesByConversation, activeConversationId],
   );
 
+  const listItems = useMemo(() => injectDateSeparators(messages), [messages]);
+
   const [sendingMessage, setSendingMessage] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [draft, setDraft] = useState('');
-  const flatListRef = useRef<FlatListType<ChatMessage>>(null);
+  const flatListRef = useRef<FlatListType<ListItem>>(null);
   const lastAutoReadMessageIdRef = useRef<number | null>(null);
 
   // Scroll to bottom whenever message list grows
@@ -211,14 +272,30 @@ export function ChatRoomScreen({route}: ChatRoomScreenProps): React.JSX.Element 
       <FlatList
         ref={flatListRef}
         contentContainerStyle={styles.list}
-        data={messages}
-        keyExtractor={item => String(item.id)}
-        renderItem={({item}) => (
-          <ChatBubble
-            isOwn={Boolean(currentUserId && item.sender_id === currentUserId)}
-            message={item}
-          />
-        )}
+        data={listItems}
+        keyExtractor={item =>
+          (item as DateSeparator).kind === '__date_separator__'
+            ? (item as DateSeparator).id
+            : String((item as ChatMessage).id)
+        }
+        renderItem={({item}) => {
+          if ((item as DateSeparator).kind === '__date_separator__') {
+            return (
+              <View style={styles.dateSeparatorWrap}>
+                <View style={styles.dateSeparatorLine} />
+                <Text style={styles.dateSeparatorLabel}>{(item as DateSeparator).label}</Text>
+                <View style={styles.dateSeparatorLine} />
+              </View>
+            );
+          }
+          const msg = item as ChatMessage;
+          return (
+            <ChatBubble
+              isOwn={Boolean(currentUserId && msg.sender_id === currentUserId)}
+              message={msg}
+            />
+          );
+        }}
         ListEmptyComponent={
           loadingMessages ? null : (
             <EmptyState
@@ -301,5 +378,27 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     fontSize: 14,
     fontWeight: '700',
+  },
+  dateSeparatorWrap: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    marginVertical: 12,
+    paddingHorizontal: 4,
+  },
+  dateSeparatorLine: {
+    backgroundColor: colors.border,
+    flex: 1,
+    height: 1,
+  },
+  dateSeparatorLabel: {
+    color: colors.textSecondary,
+    fontSize: 12,
+    flexShrink: 0,
+    marginHorizontal: 10,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    backgroundColor: colors.background,
+    borderRadius: 10,
+    overflow: 'hidden',
   },
 });

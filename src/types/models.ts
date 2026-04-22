@@ -24,6 +24,7 @@ export interface ChatMessage {
   sender_id: number | null;
   type: MessageType;
   content: string;
+  status?: string;
   created_at: string;
   sender?: {
     id: number;
