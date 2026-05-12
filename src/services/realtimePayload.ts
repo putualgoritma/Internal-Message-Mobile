@@ -106,6 +106,31 @@ function asNumber(value: unknown, fallback = 0): number {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+function asBoolean(value: unknown): boolean | undefined {
+  if (typeof value === 'boolean') {
+    return value;
+  }
+
+  if (typeof value === 'number') {
+    return value !== 0;
+  }
+
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (!normalized) {
+      return undefined;
+    }
+    if (normalized === 'true' || normalized === '1') {
+      return true;
+    }
+    if (normalized === 'false' || normalized === '0') {
+      return false;
+    }
+  }
+
+  return undefined;
+}
+
 function readNestedObject(
   payload: unknown,
   keys: string[],
@@ -171,6 +196,11 @@ export function normalizeMessagePayload(payload: unknown): ChatMessage | null {
     type,
     content,
     status: candidate.status !== undefined ? asString(candidate.status, '') || undefined : undefined,
+    is_read: asBoolean(candidate.is_read ?? candidate.isRead),
+    read_at:
+      candidate.read_at !== undefined || candidate.readAt !== undefined
+        ? asString(candidate.read_at ?? candidate.readAt, '').trim() || null
+        : undefined,
     created_at: asString(candidate.created_at ?? candidate.createdAt, new Date().toISOString()),
     metadata: metadata ?? undefined,
     sender: asObject(candidate.sender)

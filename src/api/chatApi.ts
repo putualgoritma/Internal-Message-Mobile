@@ -76,11 +76,38 @@ function pickMessageText(
   return type === 'action' ? 'Action required' : raw;
 }
 
+function normalizeBoolean(value: unknown): boolean | undefined {
+  if (typeof value === 'boolean') {
+    return value;
+  }
+
+  if (typeof value === 'number') {
+    return value !== 0;
+  }
+
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (!normalized) {
+      return undefined;
+    }
+    if (normalized === 'true' || normalized === '1') {
+      return true;
+    }
+    if (normalized === 'false' || normalized === '0') {
+      return false;
+    }
+  }
+
+  return undefined;
+}
+
 function normalizeMessage(input: ChatMessage): ChatMessage {
   const asRecord = input as ChatMessage & {
     message_type?: ChatMessage['type'];
     sender_name?: string;
     metadata?: unknown;
+    isRead?: unknown;
+    readAt?: unknown;
   };
 
   const normalizedType = normalizeMessageType(asRecord.type ?? asRecord.message_type);
@@ -98,12 +125,19 @@ function normalizeMessage(input: ChatMessage): ChatMessage {
           name: asRecord.sender_name,
         }
       : undefined);
+  const normalizedIsRead = normalizeBoolean(asRecord.is_read ?? asRecord.isRead);
+  const normalizedReadAt =
+    asRecord.read_at == null && asRecord.readAt == null
+      ? asRecord.read_at
+      : String(asRecord.read_at ?? asRecord.readAt ?? '').trim() || null;
 
   if (
     normalizedType !== asRecord.type ||
     normalizedSender !== asRecord.sender ||
     normalizedContent !== asRecord.content ||
-    normalizedMetadata !== asRecord.metadata
+    normalizedMetadata !== asRecord.metadata ||
+    normalizedIsRead !== asRecord.is_read ||
+    normalizedReadAt !== asRecord.read_at
   ) {
     return {
       ...asRecord,
@@ -111,6 +145,8 @@ function normalizeMessage(input: ChatMessage): ChatMessage {
       content: normalizedContent,
       sender: normalizedSender,
       metadata: normalizedMetadata,
+      is_read: normalizedIsRead,
+      read_at: normalizedReadAt,
     };
   }
 

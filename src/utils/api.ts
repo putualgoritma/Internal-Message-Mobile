@@ -27,8 +27,46 @@ export function unwrapApiPayload<T>(payload: unknown): T {
 
 export function toErrorMessage(error: unknown): string {
   if (axios.isAxiosError(error)) {
-    const data = error.response?.data as ApiErrorShape | undefined;
-    return data?.message ?? error.message;
+    const data = error.response?.data as
+      | ApiErrorShape
+      | {error?: string; errors?: Record<string, string[] | string>}
+      | string
+      | undefined;
+
+    if (typeof data === 'string' && data.trim()) {
+      return data;
+    }
+
+    if (data && typeof data === 'object') {
+      const message =
+        (data as {message?: string}).message ??
+        (data as {error?: string}).error;
+
+      if (typeof message === 'string' && message.trim()) {
+        return message;
+      }
+
+      const fieldErrors = (data as {errors?: Record<string, string[] | string>}).errors;
+      if (fieldErrors && typeof fieldErrors === 'object') {
+        const firstValue = Object.values(fieldErrors)[0];
+        if (Array.isArray(firstValue) && typeof firstValue[0] === 'string') {
+          return firstValue[0];
+        }
+        if (typeof firstValue === 'string') {
+          return firstValue;
+        }
+      }
+    }
+
+    if (error.code === 'ECONNABORTED') {
+      return 'Request timed out. Please try again.';
+    }
+
+    if (!error.response) {
+      return 'Cannot reach server. Check internet connection and API URL.';
+    }
+
+    return error.message;
   }
 
   if (error instanceof Error) {

@@ -1,3 +1,5 @@
+import {Platform} from 'react-native';
+
 export type RuntimeEnvironment = 'development' | 'staging' | 'production';
 
 export interface AppConfig {
@@ -12,10 +14,16 @@ export interface AppConfig {
   oneSignalAppId: string;
 }
 
+const LOCAL_DEV_HOST = Platform.select({
+  android: '10.0.2.2',
+  ios: '127.0.0.1',
+  default: '127.0.0.1',
+});
+
 const DEFAULT_CONFIG: AppConfig = {
-  apiBaseUrl: 'http://10.0.2.2:8000/api/v1',
-  broadcastAuthUrl: 'http://10.0.2.2:8000/broadcasting/auth',
-  wsHost: '10.0.2.2',
+  apiBaseUrl: `http://${LOCAL_DEV_HOST}:8000/api/v1`,
+  broadcastAuthUrl: `http://${LOCAL_DEV_HOST}:8000/broadcasting/auth`,
+  wsHost: LOCAL_DEV_HOST,
   wsPort: 6001,
   wsScheme: 'http',
   wsPath: '',     // pusher-js appends /app/{key} automatically; do NOT put '/app' here

@@ -10,6 +10,7 @@ type PushTapCallback = (payload: Record<string, unknown>) => void;
 
 let initialized = false;
 let registeredTapListener: ((event: NotificationClickEvent) => void) | null = null;
+const PUSH_SUBSCRIPTION_ID_TIMEOUT_MS = 1500;
 
 export function initializePush(onTap: PushTapCallback): void {
   if (initialized || !APP_CONFIG.oneSignalAppId) {
@@ -61,7 +62,15 @@ export async function getPushSubscriptionId(): Promise<string | null> {
   }
 
   try {
-    const pushId = await OneSignal.User.pushSubscription.getPushSubscriptionId();
+    const pushId = await Promise.race<string | null>([
+      OneSignal.User.pushSubscription
+        .getIdAsync()
+        .then(value => value || null)
+        .catch(() => null),
+      new Promise<null>(resolve => {
+        setTimeout(() => resolve(null), PUSH_SUBSCRIPTION_ID_TIMEOUT_MS);
+      }),
+    ]);
     return pushId || null;
   } catch {
     return null;

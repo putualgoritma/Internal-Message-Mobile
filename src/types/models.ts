@@ -25,6 +25,8 @@ export interface ChatMessage {
   type: MessageType;
   content: string;
   status?: string;
+  is_read?: boolean;
+  read_at?: string | null;
   created_at: string;
   sender?: {
     id: number;
