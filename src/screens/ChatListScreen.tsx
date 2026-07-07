@@ -125,7 +125,7 @@ export function ChatListScreen(): React.JSX.Element {
         <Text style={{color: wsColor, fontSize: 10, fontWeight: '400'}} numberOfLines={2}>{wsLastEvent ?? 'no events yet'}</Text>
       </View>
       <View style={styles.headerRow}>
-        <Text style={styles.heading}>Chats</Text>
+        <Text style={styles.heading}>Chats (Ver: 2026-07-01)</Text>
         <Pressable
           onPress={() => navigation.navigate('NewConversation')}
           style={styles.newChatButton}>

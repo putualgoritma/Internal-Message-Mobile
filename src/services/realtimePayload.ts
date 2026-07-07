@@ -1,4 +1,4 @@
-import type {ChatMessage, NotificationItem} from '../types/models';
+import type {ChatMessage, MessageAttachment, NotificationItem} from '../types/models';
 
 export interface NormalizedUnreadPayload {
   totalChatUnread: number;
@@ -131,6 +131,37 @@ function asBoolean(value: unknown): boolean | undefined {
   return undefined;
 }
 
+function normalizeAttachments(value: unknown): MessageAttachment[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  const normalized = value
+    .map((item): MessageAttachment | null => {
+      if (!item || typeof item !== 'object') {
+        return null;
+      }
+
+      const data = item as Record<string, unknown>;
+      const url = asString(data.url, '').trim();
+      const path = asString(data.path, '').trim();
+      const type = asString(data.type, '').trim();
+
+      if (!url && !path) {
+        return null;
+      }
+
+      return {
+        url: url || undefined,
+        path: path || undefined,
+        type: type || undefined,
+      };
+    })
+    .filter((item): item is MessageAttachment => item !== null);
+
+  return normalized.length > 0 ? normalized : undefined;
+}
+
 function readNestedObject(
   payload: unknown,
   keys: string[],
@@ -176,13 +207,16 @@ export function normalizeMessagePayload(payload: unknown): ChatMessage | null {
 
   const type = normalizeMessageType(candidate.type ?? candidate.message_type);
   const metadata = asObject(candidate.metadata);
+  const attachments =
+    normalizeAttachments(candidate.attachments) ??
+    normalizeAttachments((metadata as Record<string, unknown> | undefined)?.attachments);
   const content = normalizeMessageContent(
     candidate.content ?? candidate.body ?? candidate.text ?? candidate.message,
     type,
     metadata ?? undefined,
   );
 
-  if (conversationId <= 0 || !content) {
+  if (conversationId <= 0 || (!content && !attachments?.length)) {
     return null;
   }
 
@@ -202,6 +236,7 @@ export function normalizeMessagePayload(payload: unknown): ChatMessage | null {
         ? asString(candidate.read_at ?? candidate.readAt, '').trim() || null
         : undefined,
     created_at: asString(candidate.created_at ?? candidate.createdAt, new Date().toISOString()),
+    attachments,
     metadata: metadata ?? undefined,
     sender: asObject(candidate.sender)
       ? {

@@ -18,6 +18,12 @@ export interface ActionMetadata {
   }>;
 }
 
+export interface MessageAttachment {
+  url?: string;
+  path?: string;
+  type?: string;
+}
+
 export interface ChatMessage {
   id: number;
   conversation_id: number;
@@ -32,6 +38,7 @@ export interface ChatMessage {
     id: number;
     name: string;
   };
+  attachments?: MessageAttachment[];
   metadata?: ActionMetadata | Record<string, unknown>;
 }
 

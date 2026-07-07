@@ -1,4 +1,4 @@
-import type {ChatMessage, Conversation, User} from '../types/models';
+import type {ChatMessage, Conversation, MessageAttachment, User} from '../types/models';
 import {unwrapApiPayload} from '../utils/api';
 import {apiClient} from './client';
 
@@ -101,6 +101,37 @@ function normalizeBoolean(value: unknown): boolean | undefined {
   return undefined;
 }
 
+function normalizeAttachments(value: unknown): MessageAttachment[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  const normalized = value
+    .map((item): MessageAttachment | null => {
+      if (!item || typeof item !== 'object') {
+        return null;
+      }
+
+      const data = item as Record<string, unknown>;
+      const url = typeof data.url === 'string' ? data.url.trim() : '';
+      const path = typeof data.path === 'string' ? data.path.trim() : '';
+      const type = typeof data.type === 'string' ? data.type.trim() : '';
+
+      if (!url && !path) {
+        return null;
+      }
+
+      return {
+        url: url || undefined,
+        path: path || undefined,
+        type: type || undefined,
+      };
+    })
+    .filter((item): item is MessageAttachment => item !== null);
+
+  return normalized.length > 0 ? normalized : undefined;
+}
+
 function normalizeMessage(input: ChatMessage): ChatMessage {
   const asRecord = input as ChatMessage & {
     message_type?: ChatMessage['type'];
@@ -108,6 +139,7 @@ function normalizeMessage(input: ChatMessage): ChatMessage {
     metadata?: unknown;
     isRead?: unknown;
     readAt?: unknown;
+    attachments?: unknown;
   };
 
   const normalizedType = normalizeMessageType(asRecord.type ?? asRecord.message_type);
@@ -130,6 +162,9 @@ function normalizeMessage(input: ChatMessage): ChatMessage {
     asRecord.read_at == null && asRecord.readAt == null
       ? asRecord.read_at
       : String(asRecord.read_at ?? asRecord.readAt ?? '').trim() || null;
+  const normalizedAttachments =
+    normalizeAttachments(asRecord.attachments) ??
+    normalizeAttachments((normalizedMetadata as Record<string, unknown> | undefined)?.attachments);
 
   if (
     normalizedType !== asRecord.type ||
@@ -137,7 +172,8 @@ function normalizeMessage(input: ChatMessage): ChatMessage {
     normalizedContent !== asRecord.content ||
     normalizedMetadata !== asRecord.metadata ||
     normalizedIsRead !== asRecord.is_read ||
-    normalizedReadAt !== asRecord.read_at
+    normalizedReadAt !== asRecord.read_at ||
+    normalizedAttachments !== asRecord.attachments
   ) {
     return {
       ...asRecord,
@@ -147,6 +183,7 @@ function normalizeMessage(input: ChatMessage): ChatMessage {
       metadata: normalizedMetadata,
       is_read: normalizedIsRead,
       read_at: normalizedReadAt,
+      attachments: normalizedAttachments,
     };
   }
 

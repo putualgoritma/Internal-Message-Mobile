@@ -135,7 +135,6 @@ export function ChatRoomScreen({route}: ChatRoomScreenProps): React.JSX.Element 
   const markConversationRead = useChatStore(state => state.markConversationRead);
   const loadingMessages = useChatStore(state => state.loadingMessages);
   const messagesByConversation = useChatStore(state => state.messagesByConversation);
-  const conversations = useChatStore(state => state.conversations);
 
   // Derive sorted messages from the store so realtime updates appear automatically
   const messages = useMemo(
@@ -150,120 +149,45 @@ export function ChatRoomScreen({route}: ChatRoomScreenProps): React.JSX.Element 
   const [draft, setDraft] = useState('');
   const flatListRef = useRef<FlatListType<ListItem>>(null);
   const lastAutoReadMessageIdRef = useRef<number | null>(null);
-  const pendingInitialScrollRef = useRef(false);
-  const initialUnreadCountRef = useRef<number>(0);
-  const initialScrollRetryTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const hasInitialBottomScrollRef = useRef(false);
+  const initialMarkReadDoneRef = useRef(false);
 
-  const activeConversation = useMemo(
-    () => conversations.find(item => item.id === activeConversationId),
-    [activeConversationId, conversations],
-  );
-
-  const latestUnreadMessageId = useMemo(() => {
-    for (let index = messages.length - 1; index >= 0; index -= 1) {
-      const message = messages[index];
-      if (message.sender_id == null || message.sender_id === currentUserId) {
-        continue;
-      }
-
-      if (message.is_read === false) {
-        return message.id;
-      }
-    }
-
-    return null;
-  }, [currentUserId, messages]);
-
-  const initialScrollTargetIndex = useMemo(() => {
+  const scrollToBottom = useCallback((animated: boolean) => {
     if (listItems.length === 0) {
-      return null;
-    }
-
-    if (latestUnreadMessageId != null) {
-      const unreadIndex = listItems.findIndex(item => {
-        if ((item as DateSeparator).kind === '__date_separator__') {
-          return false;
-        }
-
-        return (item as ChatMessage).id === latestUnreadMessageId;
-      });
-
-      if (unreadIndex >= 0) {
-        return unreadIndex;
-      }
-    }
-
-    if (initialUnreadCountRef.current > 0) {
-      return listItems.length - 1;
-    }
-
-    return listItems.length - 1;
-  }, [latestUnreadMessageId, listItems]);
-
-  const performScroll = useCallback((index: number, animated: boolean) => {
-    if (listItems.length === 0 || index < 0) {
       return;
     }
 
     InteractionManager.runAfterInteractions(() => {
       requestAnimationFrame(() => {
-        if (index >= listItems.length - 1) {
-          flatListRef.current?.scrollToEnd({animated});
-          return;
-        }
-
-        flatListRef.current?.scrollToIndex({
-          index,
-          animated,
-          viewPosition: 0.5,
-        });
+        flatListRef.current?.scrollToEnd({animated});
       });
     });
   }, [listItems.length]);
 
-  const clearInitialScrollRetry = useCallback(() => {
-    if (initialScrollRetryTimeoutRef.current) {
-      clearTimeout(initialScrollRetryTimeoutRef.current);
-      initialScrollRetryTimeoutRef.current = null;
-    }
-  }, []);
+  useEffect(() => {
+    hasInitialBottomScrollRef.current = false;
+    initialMarkReadDoneRef.current = false;
+  }, [activeConversationId]);
 
-  const runInitialScroll = useCallback(() => {
-    if (!pendingInitialScrollRef.current || initialScrollTargetIndex == null) {
+  // Always keep the thread pinned to the latest message (bottom).
+  const messageCount = messages.length;
+  useEffect(() => {
+    if (messageCount === 0) {
       return;
     }
 
-    pendingInitialScrollRef.current = false;
-    clearInitialScrollRetry();
-    performScroll(initialScrollTargetIndex, false);
+    if (!hasInitialBottomScrollRef.current) {
+      hasInitialBottomScrollRef.current = true;
+      scrollToBottom(false);
 
-    initialScrollRetryTimeoutRef.current = setTimeout(() => {
-      performScroll(initialScrollTargetIndex, false);
-      initialScrollRetryTimeoutRef.current = null;
-    }, Platform.OS === 'ios' ? 250 : 100);
-  }, [clearInitialScrollRetry, initialScrollTargetIndex, performScroll]);
-
-  useEffect(() => {
-    initialUnreadCountRef.current = Number(activeConversation?.unread_count ?? 0);
-    pendingInitialScrollRef.current = true;
-    clearInitialScrollRetry();
-  }, [activeConversation?.unread_count, activeConversationId, clearInitialScrollRetry]);
-
-  // Scroll to bottom whenever message list grows
-  const messageCount = messages.length;
-  useEffect(() => {
-    if (messageCount > 0) {
-      if (pendingInitialScrollRef.current) {
-        runInitialScroll();
-      } else {
-        performScroll(listItems.length - 1, true);
+      if (activeConversationId && !initialMarkReadDoneRef.current) {
+        initialMarkReadDoneRef.current = true;
+        markConversationRead(activeConversationId).catch(() => {});
       }
+    } else {
+      scrollToBottom(true);
     }
-  }, [listItems.length, messageCount, performScroll, runInitialScroll]);
-
-  useEffect(() => () => {
-    clearInitialScrollRetry();
-  }, [clearInitialScrollRetry]);
+  }, [activeConversationId, markConversationRead, messageCount, scrollToBottom]);
 
   // Load messages from store on mount
   useEffect(() => {
@@ -272,13 +196,12 @@ export function ChatRoomScreen({route}: ChatRoomScreenProps): React.JSX.Element 
     }
 
     fetchMessages(conversationId).catch(() => {});
-    markConversationRead(conversationId).catch(() => {});
-  }, [conversationId, fetchMessages, markConversationRead]);
+  }, [conversationId, fetchMessages]);
 
-  // Auto-mark-read when screen gains focus (clears badge if new messages arrived while away)
+  // Auto-mark-read when screen regains focus after initial positioning.
   useFocusEffect(
     useCallback(() => {
-      if (!activeConversationId) {
+      if (!activeConversationId || !initialMarkReadDoneRef.current) {
         return () => {};
       }
 
@@ -387,30 +310,10 @@ export function ChatRoomScreen({route}: ChatRoomScreenProps): React.JSX.Element 
             : String((item as ChatMessage).id)
         }
         onContentSizeChange={() => {
-          if (!pendingInitialScrollRef.current || listItems.length === 0) {
-            return;
-          }
-
-          runInitialScroll();
+          scrollToBottom(false);
         }}
         onLayout={() => {
-          if (!pendingInitialScrollRef.current || listItems.length === 0) {
-            return;
-          }
-
-          runInitialScroll();
-        }}
-        onScrollToIndexFailed={info => {
-          flatListRef.current?.scrollToOffset({
-            offset: Math.max(0, info.averageItemLength * info.index),
-            animated: false,
-          });
-
-          clearInitialScrollRetry();
-          initialScrollRetryTimeoutRef.current = setTimeout(() => {
-            performScroll(info.index, false);
-            initialScrollRetryTimeoutRef.current = null;
-          }, Platform.OS === 'ios' ? 250 : 100);
+          scrollToBottom(false);
         }}
         renderItem={({item}) => {
           if ((item as DateSeparator).kind === '__date_separator__') {

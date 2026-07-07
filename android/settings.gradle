@@ -1,6 +1,44 @@
-pluginManagement { includeBuild("../node_modules/@react-native/gradle-plugin") }
+import org.gradle.api.initialization.resolve.RepositoriesMode
+
+pluginManagement {
+	includeBuild("../node_modules/@react-native/gradle-plugin")
+	repositories {
+		gradlePluginPortal()
+		google()
+		mavenCentral()
+	}
+	resolutionStrategy {
+		eachPlugin {
+			if (requested.id.id == "org.jetbrains.kotlin.android" ||
+				requested.id.id == "org.jetbrains.kotlin.jvm" ||
+				requested.id.id == "org.jetbrains.kotlin.kapt") {
+				useVersion("1.9.24")
+			}
+		}
+	}
+}
+
 plugins { id("com.facebook.react.settings") }
+
 extensions.configure(com.facebook.react.ReactSettingsExtension){ ex -> ex.autolinkLibrariesFromCommand() }
+
+dependencyResolutionManagement {
+	repositoriesMode.set(RepositoriesMode.PREFER_SETTINGS)
+	repositories {
+		google()
+		mavenCentral()
+
+		// Ensure Kotlin artifacts resolve from Maven Central, not transient snapshot mirrors.
+		exclusiveContent {
+			forRepository {
+				mavenCentral()
+			}
+			filter {
+				includeGroupByRegex("org\\.jetbrains\\.kotlin(\\..*)?")
+			}
+		}
+	}
+}
 rootProject.name = 'PTABInternalMessageMobile'
 include ':app'
 includeBuild('../node_modules/@react-native/gradle-plugin')

@@ -1,8 +1,17 @@
 import React, {useState} from 'react';
-import {ActivityIndicator, Pressable, StyleSheet, Text, View} from 'react-native';
+import {
+  ActivityIndicator,
+  Image,
+  Modal,
+  Pressable,
+  StyleSheet,
+  Text,
+  View,
+} from 'react-native';
 
 import type {ChatMessage} from '../types/models';
 import {chatApi} from '../api/chatApi';
+import {APP_CONFIG} from '../config/appConfig';
 import {colors} from '../theme/colors';
 
 interface ChatBubbleProps {
@@ -34,10 +43,94 @@ function formatTime(value: string): string {
     .padStart(2, '0')}`;
 }
 
+interface ImageAttachment {
+  uri: string;
+}
+
+function resolveAttachmentUrl(rawValue: string): string {
+  const raw = rawValue.trim();
+  if (!raw) {
+    return '';
+  }
+
+  if (/^https?:\/\//i.test(raw)) {
+    return raw;
+  }
+
+  const base = APP_CONFIG.apiBaseUrl.trim();
+  const originMatch = base.match(/^(https?:\/\/[^/]+)/i);
+  const origin = originMatch?.[1] ?? '';
+  if (!origin) {
+    return raw;
+  }
+
+  const [pathPart, queryPart] = raw.split('?');
+  const encodedPath = pathPart
+    .split('/')
+    .map(segment => encodeURIComponent(decodeURIComponent(segment)))
+    .join('/');
+
+  return `${origin}${encodedPath.startsWith('/') ? '' : '/'}${encodedPath}${
+    queryPart ? `?${queryPart}` : ''
+  }`;
+}
+
+function isLikelyImage(type: string, path: string): boolean {
+  const normalizedType = type.trim().toLowerCase();
+  if (normalizedType.includes('image')) {
+    return true;
+  }
+
+  return /\.(png|jpe?g|gif|webp|bmp|heic|heif)$/i.test(path.trim());
+}
+
+function extractImageAttachments(message: ChatMessage): ImageAttachment[] {
+  const source = message as ChatMessage & {
+    attachments?: unknown;
+    metadata?: unknown;
+  };
+  const metadata =
+    source.metadata && typeof source.metadata === 'object' && !Array.isArray(source.metadata)
+      ? (source.metadata as Record<string, unknown>)
+      : undefined;
+
+  const attachmentCandidates = [source.attachments, metadata?.attachments]
+    .filter(Array.isArray)
+    .flatMap(item => item as unknown[])
+    .filter(item => item && typeof item === 'object') as Record<string, unknown>[];
+
+  const unique = new Set<string>();
+  const images: ImageAttachment[] = [];
+
+  for (const item of attachmentCandidates) {
+    const url = typeof item.url === 'string' ? item.url.trim() : '';
+    const path = typeof item.path === 'string' ? item.path.trim() : '';
+    const type = typeof item.type === 'string' ? item.type : '';
+    const rawValue = url || path;
+
+    if (!rawValue || !isLikelyImage(type, rawValue)) {
+      continue;
+    }
+
+    const resolved = resolveAttachmentUrl(rawValue);
+    if (!resolved || unique.has(resolved)) {
+      continue;
+    }
+
+    unique.add(resolved);
+    images.push({uri: resolved});
+  }
+
+  return images;
+}
+
 export function ChatBubble({message, isOwn}: ChatBubbleProps): React.JSX.Element {
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionDone, setActionDone] = useState(false);
+  const [previewImageUri, setPreviewImageUri] = useState<string | null>(null);
+
+  const imageAttachments = extractImageAttachments(message);
 
   const normalizedType = String(message.type ?? 'text').trim().toLowerCase();
   const isSystem = normalizedType === 'system';
@@ -157,6 +250,22 @@ export function ChatBubble({message, isOwn}: ChatBubbleProps): React.JSX.Element
       <View style={[styles.row, styles.rowOther]}>
         <View style={styles.actionBubble}>
           <Text style={styles.actionContent}>{contentText}</Text>
+          {imageAttachments.length > 0 ? (
+            <View style={styles.attachmentsWrap}>
+              {imageAttachments.map(item => (
+                <Pressable
+                  key={item.uri}
+                  onPress={() => setPreviewImageUri(item.uri)}
+                  style={styles.thumbPressable}>
+                  <Image
+                    resizeMode="cover"
+                    source={{uri: item.uri}}
+                    style={styles.thumbImage}
+                  />
+                </Pressable>
+              ))}
+            </View>
+          ) : null}
           {actionError && <Text style={styles.actionErrorText}>{actionError}</Text>}
           {shouldShowActions ? (
             <View
@@ -201,6 +310,22 @@ export function ChatBubble({message, isOwn}: ChatBubbleProps): React.JSX.Element
           )}
           <Text style={styles.actionTime}>{formatTime(message.created_at)}</Text>
         </View>
+        <Modal
+          animationType="fade"
+          onRequestClose={() => setPreviewImageUri(null)}
+          transparent
+          visible={Boolean(previewImageUri)}>
+          <Pressable onPress={() => setPreviewImageUri(null)} style={styles.previewBackdrop}>
+            {previewImageUri ? (
+              <Image
+                resizeMode="contain"
+                source={{uri: previewImageUri}}
+                style={styles.previewImage}
+              />
+            ) : null}
+            <Text style={styles.previewHint}>Tap anywhere to close</Text>
+          </Pressable>
+        </Modal>
       </View>
     );
   }
@@ -211,10 +336,42 @@ export function ChatBubble({message, isOwn}: ChatBubbleProps): React.JSX.Element
         <Text style={[styles.content, isOwn ? styles.contentOwn : styles.contentOther]}>
           {message.content}
         </Text>
+        {imageAttachments.length > 0 ? (
+          <View style={styles.attachmentsWrap}>
+            {imageAttachments.map(item => (
+              <Pressable
+                key={item.uri}
+                onPress={() => setPreviewImageUri(item.uri)}
+                style={styles.thumbPressable}>
+                <Image
+                  resizeMode="cover"
+                  source={{uri: item.uri}}
+                  style={styles.thumbImage}
+                />
+              </Pressable>
+            ))}
+          </View>
+        ) : null}
         <Text style={[styles.time, isOwn ? styles.timeOwn : styles.timeOther]}>
           {formatTime(message.created_at)}
         </Text>
       </View>
+      <Modal
+        animationType="fade"
+        onRequestClose={() => setPreviewImageUri(null)}
+        transparent
+        visible={Boolean(previewImageUri)}>
+        <Pressable onPress={() => setPreviewImageUri(null)} style={styles.previewBackdrop}>
+          {previewImageUri ? (
+            <Image
+              resizeMode="contain"
+              source={{uri: previewImageUri}}
+              style={styles.previewImage}
+            />
+          ) : null}
+          <Text style={styles.previewHint}>Tap anywhere to close</Text>
+        </Pressable>
+      </Modal>
     </View>
   );
 }
@@ -254,6 +411,39 @@ const styles = StyleSheet.create({
   time: {
     fontSize: 11,
     marginTop: 4,
+  },
+  attachmentsWrap: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginTop: 8,
+    marginBottom: 4,
+  },
+  thumbPressable: {
+    borderRadius: 10,
+    overflow: 'hidden',
+  },
+  thumbImage: {
+    backgroundColor: '#DCE6F2',
+    borderRadius: 10,
+    height: 120,
+    width: 120,
+  },
+  previewBackdrop: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(0, 0, 0, 0.92)',
+    flex: 1,
+    justifyContent: 'center',
+    paddingHorizontal: 12,
+  },
+  previewImage: {
+    height: '82%',
+    width: '100%',
+  },
+  previewHint: {
+    color: '#FFFFFF',
+    fontSize: 13,
+    marginTop: 8,
   },
   timeOwn: {
     color: '#E5EDF8',
