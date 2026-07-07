@@ -8,10 +8,10 @@
     "lint": "eslint .",
     "postinstall": "patch-package",
     "typecheck": "tsc --noEmit",
-    "start": "cross-env CI=1 react-native start --port 8081 --no-interactive",
-    "start:stable": "cross-env CI=1 react-native start --port 8081 --no-interactive --reset-cache",
-    "start:nowatch": "cross-env CI=1 react-native start --port 8081 --no-interactive",
-    "start:nowatch:reset": "cross-env CI=1 react-native start --port 8081 --no-interactive --reset-cache",
+    "start": "react-native start --port 8081 --no-interactive",
+    "start:stable": "react-native start --port 8081 --no-interactive --reset-cache",
+    "start:nowatch": "react-native start --port 8081 --no-interactive",
+    "start:nowatch:reset": "react-native start --port 8081 --no-interactive --reset-cache",
     "test": "jest"
   },
   "dependencies": {
