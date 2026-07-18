@@ -1,6 +1,8 @@
 import {create} from 'zustand';
 
 import {chatApi} from '../api/chatApi';
+import {clearBadgeAndNotifications, setBadgeCount} from '../services/badgeService';
+import {clearDeliveredPushNotifications} from '../services/pushService';
 import type {ChatMessage, Conversation} from '../types/models';
 import {toErrorMessage} from '../utils/api';
 import {useAuthStore} from './authStore';
@@ -197,6 +199,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
   markConversationRead: async (conversationId: number) => {
     // Optimistically clear badge immediately — don't wait for API
     useUnreadStore.getState().setConversationUnread(conversationId, 0);
+    setBadgeCount(useUnreadStore.getState().totalChatUnread);
+    clearBadgeAndNotifications();
+    clearDeliveredPushNotifications();
     set(state => ({
       conversations: state.conversations.map(item =>
         item.id === conversationId ? {...item, unread_count: 0} : item,
@@ -239,6 +244,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       useUnreadStore
         .getState()
         .setConversationUnread(conversationId, currentUnread + 1);
+      setBadgeCount(useUnreadStore.getState().totalChatUnread);
     }
 
     set(state => {

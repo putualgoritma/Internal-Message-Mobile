@@ -18,16 +18,13 @@ function AppBootstrap(): React.JSX.Element {
   const userId = useAuthStore(state => state.user?.id);
   const isAuthenticated = useAuthStore(state => state.isAuthenticated);
   const totalChatUnread = useUnreadStore(state => state.totalChatUnread);
-  const unreadNotificationCount = useUnreadStore(
-    state => state.unreadNotificationCount,
-  );
 
   useRealtime();
 
   useEffect(() => {
-    // Keep launcher badge aligned with in-app unread state.
-    setBadgeCount(totalChatUnread + unreadNotificationCount);
-  }, [totalChatUnread, unreadNotificationCount]);
+    // Launcher badge should reflect unread chat messages.
+    setBadgeCount(totalChatUnread);
+  }, [totalChatUnread]);
 
   useEffect(() => {
     LogBox.ignoreLogs([

@@ -3,6 +3,8 @@ import {
   FlatList,
   InteractionManager,
   KeyboardAvoidingView,
+  NativeScrollEvent,
+  NativeSyntheticEvent,
   Platform,
   Pressable,
   StyleSheet,
@@ -90,6 +92,8 @@ interface ChatRoomScreenProps {
   route: ChatRoomRouteProp;
 }
 
+const AUTO_SCROLL_BOTTOM_THRESHOLD_PX = 120;
+
 function sortMessages(messages: ChatMessage[]): ChatMessage[] {
   return [...messages].sort((a, b) => {
     const timeA = new Date(a.created_at).getTime();
@@ -151,6 +155,7 @@ export function ChatRoomScreen({route}: ChatRoomScreenProps): React.JSX.Element 
   const lastAutoReadMessageIdRef = useRef<number | null>(null);
   const hasInitialBottomScrollRef = useRef(false);
   const initialMarkReadDoneRef = useRef(false);
+  const shouldStickToBottomRef = useRef(true);
 
   const scrollToBottom = useCallback((animated: boolean) => {
     if (listItems.length === 0) {
@@ -164,9 +169,30 @@ export function ChatRoomScreen({route}: ChatRoomScreenProps): React.JSX.Element 
     });
   }, [listItems.length]);
 
+  const maybeScrollToBottom = useCallback(
+    (animated: boolean, force: boolean = false) => {
+      if (force || shouldStickToBottomRef.current) {
+        scrollToBottom(animated);
+      }
+    },
+    [scrollToBottom],
+  );
+
+  const handleListScroll = useCallback(
+    (event: NativeSyntheticEvent<NativeScrollEvent>) => {
+      const {contentOffset, contentSize, layoutMeasurement} = event.nativeEvent;
+      const distanceFromBottom =
+        contentSize.height - (contentOffset.y + layoutMeasurement.height);
+      shouldStickToBottomRef.current =
+        distanceFromBottom <= AUTO_SCROLL_BOTTOM_THRESHOLD_PX;
+    },
+    [],
+  );
+
   useEffect(() => {
     hasInitialBottomScrollRef.current = false;
     initialMarkReadDoneRef.current = false;
+    shouldStickToBottomRef.current = true;
   }, [activeConversationId]);
 
   // Always keep the thread pinned to the latest message (bottom).
@@ -185,9 +211,20 @@ export function ChatRoomScreen({route}: ChatRoomScreenProps): React.JSX.Element 
         markConversationRead(activeConversationId).catch(() => {});
       }
     } else {
-      scrollToBottom(true);
+      const latest = messages[messages.length - 1];
+      const isOwnLatest =
+        latest?.sender_id != null && latest.sender_id === currentUserId;
+      maybeScrollToBottom(true, isOwnLatest);
     }
-  }, [activeConversationId, markConversationRead, messageCount, scrollToBottom]);
+  }, [
+    activeConversationId,
+    currentUserId,
+    markConversationRead,
+    maybeScrollToBottom,
+    messageCount,
+    messages,
+    scrollToBottom,
+  ]);
 
   // Load messages from store on mount
   useEffect(() => {
@@ -310,11 +347,17 @@ export function ChatRoomScreen({route}: ChatRoomScreenProps): React.JSX.Element 
             : String((item as ChatMessage).id)
         }
         onContentSizeChange={() => {
-          scrollToBottom(false);
+          maybeScrollToBottom(false, !hasInitialBottomScrollRef.current);
         }}
         onLayout={() => {
-          scrollToBottom(false);
+          maybeScrollToBottom(false, !hasInitialBottomScrollRef.current);
         }}
+        onScrollBeginDrag={() => {
+          // Immediately stop auto-pinning when the user starts manual scrolling.
+          shouldStickToBottomRef.current = false;
+        }}
+        onScroll={handleListScroll}
+        scrollEventThrottle={16}
         renderItem={({item}) => {
           if ((item as DateSeparator).kind === '__date_separator__') {
             return (

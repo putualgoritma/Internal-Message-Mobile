@@ -56,6 +56,14 @@ export function teardownPush(): void {
   initialized = false;
 }
 
+export function clearDeliveredPushNotifications(): void {
+  try {
+    OneSignal.Notifications.clearAllNotifications();
+  } catch {
+    // Clearing notifications is best-effort.
+  }
+}
+
 export async function getPushSubscriptionId(): Promise<string | null> {
   if (!initialized) {
     return null;

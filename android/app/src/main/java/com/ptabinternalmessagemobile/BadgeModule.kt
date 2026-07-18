@@ -1,5 +1,7 @@
 package com.ptabinternalmessagemobile
 
+import android.app.NotificationManager
+import android.content.Context
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
@@ -20,6 +22,18 @@ class BadgeModule(reactContext: ReactApplicationContext) :
             }
         } catch (_: Exception) {
             // Badge not supported on this launcher — fail silently.
+        }
+    }
+
+    @ReactMethod
+    fun clearBadgeAndNotifications() {
+        try {
+            val manager = reactApplicationContext.getSystemService(Context.NOTIFICATION_SERVICE)
+                    as? NotificationManager
+            manager?.cancelAll()
+            ShortcutBadger.removeCount(reactApplicationContext)
+        } catch (_: Exception) {
+            // Some launchers/devices may reject badge ops — ignore.
         }
     }
 }
