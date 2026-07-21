@@ -31,6 +31,8 @@ export interface ChatMessage {
   type: MessageType;
   content: string;
   status?: string;
+  action_clicked?: boolean | number | string;
+  action_clicked_at?: string | null;
   is_read?: boolean;
   read_at?: string | null;
   created_at: string;

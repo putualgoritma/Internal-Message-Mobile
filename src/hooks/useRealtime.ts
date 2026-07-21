@@ -83,10 +83,6 @@ export function useRealtime(): void {
               .catch(() => {
                 // Store captures error state.
               });
-          } else {
-            useUnreadStore
-              .getState()
-              .setTotalChatUnread(payload.totalChatUnread);
           }
 
           // Keep chat list in sync even if message event names differ server-side.

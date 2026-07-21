@@ -50,42 +50,127 @@ function toFallbackMessage(conversation: Conversation): ChatMessage | null {
   };
 }
 
-function toConversationUnreadMap(
-  conversations: Conversation[],
-): Record<number, number> {
-  return conversations.reduce<Record<number, number>>((acc, item) => {
-    acc[item.id] = Number(item.unread_count ?? 0);
-    return acc;
-  }, {});
-}
-
 function sortByCreatedAt(messages: ChatMessage[]): ChatMessage[] {
   return [...messages].sort((a, b) => {
     const timeA = new Date(a.created_at).getTime();
     const timeB = new Date(b.created_at).getTime();
 
-    // If both timestamps are valid, sort by time (ascending - oldest first)
     if (Number.isFinite(timeA) && Number.isFinite(timeB)) {
       return timeA - timeB;
     }
 
-    // If only A is valid, A comes first
     if (Number.isFinite(timeA)) {
       return -1;
     }
 
-    // If only B is valid, B comes first
     if (Number.isFinite(timeB)) {
       return 1;
     }
 
-    // If neither is valid, fall back to ID ordering
     return (a.id ?? 0) - (b.id ?? 0);
   });
 }
 
 function messageExists(messages: ChatMessage[], messageId: number): boolean {
-  return messages.some(item => item.id === messageId);
+  const targetId = Number(messageId);
+  return messages.some(item => Number(item.id) === targetId);
+}
+
+function isPendingActionMessage(
+  message: ChatMessage,
+  currentUserId: number | undefined,
+): boolean {
+  const normalizedType = String(message.type ?? 'text').trim().toLowerCase();
+  const isAction =
+    normalizedType === 'action' ||
+    normalizedType === 'action_required' ||
+    normalizedType === 'action-required';
+  if (!isAction) {
+    return false;
+  }
+
+  if (message.sender_id == null || message.sender_id === currentUserId) {
+    return false;
+  }
+
+  const metadata =
+    message.metadata &&
+    typeof message.metadata === 'object' &&
+    !Array.isArray(message.metadata)
+      ? (message.metadata as Record<string, unknown>)
+      : undefined;
+
+  const rawStatus =
+    typeof message.status === 'string'
+      ? message.status
+      : typeof metadata?.status === 'string'
+        ? String(metadata.status)
+        : '';
+
+  const status = rawStatus.trim().toLowerCase();
+
+  const clickedSource = message as unknown as Record<string, unknown>;
+  const clickedFlagRaw = clickedSource.action_clicked;
+  const clickedAtRaw = clickedSource.action_clicked_at;
+  const clickedInMetadataRaw = metadata?.action_clicked;
+  const clickedAtInMetadataRaw = metadata?.action_clicked_at;
+
+  const isClicked =
+    clickedFlagRaw === true ||
+    clickedFlagRaw === 1 ||
+    clickedFlagRaw === '1' ||
+    clickedFlagRaw === 'true' ||
+    clickedInMetadataRaw === true ||
+    clickedInMetadataRaw === 1 ||
+    clickedInMetadataRaw === '1' ||
+    clickedInMetadataRaw === 'true' ||
+    (typeof clickedAtRaw === 'string' && clickedAtRaw.trim().length > 0) ||
+    (typeof clickedAtInMetadataRaw === 'string' &&
+      clickedAtInMetadataRaw.trim().length > 0);
+
+  if (isClicked) {
+    return false;
+  }
+
+  return status === 'pending';
+}
+
+function isUnreadNormalMessage(
+  message: ChatMessage,
+  currentUserId: number | undefined,
+): boolean {
+  const normalizedType = String(message.type ?? 'text').trim().toLowerCase();
+  const isAction =
+    normalizedType === 'action' ||
+    normalizedType === 'action_required' ||
+    normalizedType === 'action-required';
+  const isSystem = normalizedType === 'system' || normalizedType === 'info';
+  if (isAction || isSystem) {
+    return false;
+  }
+
+  if (message.sender_id == null || message.sender_id === currentUserId) {
+    return false;
+  }
+
+  const isRead = message.is_read === true;
+  const hasReadAt =
+    typeof message.read_at === 'string' && message.read_at.trim().length > 0;
+
+  return !isRead && !hasReadAt;
+}
+
+function countUnreadByRule(
+  messages: ChatMessage[],
+  currentUserId: number | undefined,
+): number {
+  return messages.filter(message => {
+    if (isPendingActionMessage(message, currentUserId)) {
+      return true;
+    }
+
+    return isUnreadNormalMessage(message, currentUserId);
+  }).length;
 }
 
 export const useChatStore = create<ChatState>((set, get) => ({
@@ -101,28 +186,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     try {
       const conversations = await chatApi.getConversations();
-
       const currentUnreadMap = useUnreadStore.getState().unreadByConversation;
+      const nextUnreadMap = {...currentUnreadMap};
 
+      // Fixed rule: never use backend unread_count as source of truth.
       const mergedConversations = conversations.map(item => {
-        const serverUnread = Number(item.unread_count ?? 0);
-        const localUnread = currentUnreadMap[item.id]; // undefined = never set locally
-
-        if (localUnread === undefined) {
-          // No local state yet — trust server
-          return item;
-        }
-        if (localUnread === 0) {
-          // User explicitly marked as read — keep 0 regardless of server lag
-          return {...item, unread_count: 0};
-        }
-        // WS has incremented locally — take the higher value so badge never goes backwards
-        return {...item, unread_count: Math.max(localUnread, serverUnread)};
+        const localUnread = currentUnreadMap[item.id] ?? 0;
+        nextUnreadMap[item.id] = localUnread;
+        return {...item, unread_count: localUnread};
       });
 
-      useUnreadStore
-        .getState()
-        .setConversationUnreadMap(toConversationUnreadMap(mergedConversations));
+      useUnreadStore.getState().setConversationUnreadMap(nextUnreadMap);
+      setBadgeCount(useUnreadStore.getState().totalChatUnread);
 
       const sortedConversations = [...mergedConversations].sort((a, b) => {
         const tA = a.updated_at ? new Date(a.updated_at).getTime() : 0;
@@ -131,6 +206,45 @@ export const useChatStore = create<ChatState>((set, get) => ({
       });
 
       set({conversations: sortedConversations});
+
+      // Reconcile all conversation counters from real pending action buttons.
+      const currentUserId = useAuthStore.getState().user?.id;
+      void (async () => {
+        const result = await Promise.all(
+          sortedConversations.map(async item => {
+            try {
+              const messages = await chatApi.getMessages(item.id);
+                  const unread = countUnreadByRule(messages, currentUserId);
+                  return {conversationId: item.id, unread};
+            } catch {
+              return null;
+            }
+          }),
+        );
+
+        const reconciled = result.filter(
+              (item): item is {conversationId: number; unread: number} => item !== null,
+        );
+
+        if (reconciled.length === 0) {
+          return;
+        }
+
+        const unreadMap = {...useUnreadStore.getState().unreadByConversation};
+        for (const item of reconciled) {
+              unreadMap[item.conversationId] = item.unread;
+        }
+
+        useUnreadStore.getState().setConversationUnreadMap(unreadMap);
+        setBadgeCount(useUnreadStore.getState().totalChatUnread);
+
+        set(state => ({
+          conversations: state.conversations.map(conversation => ({
+            ...conversation,
+            unread_count: unreadMap[conversation.id] ?? 0,
+          })),
+        }));
+      })();
     } catch (error) {
       set({error: toErrorMessage(error)});
     } finally {
@@ -143,15 +257,25 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     try {
       const messages = await chatApi.getMessages(conversationId);
-      console.log(
-        `[fetchMessages] conv=${conversationId} count=${messages.length}`,
-        messages.map(m => ({id: m.id, type: m.type, status: m.status, metadata_status: (m.metadata as Record<string,unknown>)?.status})),
-      );
+      const sortedMessages = sortByCreatedAt(messages);
       set(state => ({
         messagesByConversation: {
           ...state.messagesByConversation,
-          [conversationId]: sortByCreatedAt(messages),
+          [conversationId]: sortedMessages,
         },
+      }));
+
+      const currentUserId = useAuthStore.getState().user?.id;
+      const unreadByRule = countUnreadByRule(sortedMessages, currentUserId);
+      useUnreadStore.getState().setConversationUnread(conversationId, unreadByRule);
+      setBadgeCount(useUnreadStore.getState().totalChatUnread);
+
+      set(state => ({
+        conversations: state.conversations.map(item =>
+          item.id === conversationId
+            ? {...item, unread_count: unreadByRule}
+            : item,
+        ),
       }));
     } catch (error) {
       const fallbackConversation = get().conversations.find(
@@ -197,16 +321,32 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   markConversationRead: async (conversationId: number) => {
-    // Optimistically clear badge immediately — don't wait for API
-    useUnreadStore.getState().setConversationUnread(conversationId, 0);
-    setBadgeCount(useUnreadStore.getState().totalChatUnread);
-    clearBadgeAndNotifications();
-    clearDeliveredPushNotifications();
+    const currentUserId = useAuthStore.getState().user?.id;
+    const messages = get().messagesByConversation[conversationId] ?? [];
+    const unreadByRule = countUnreadByRule(messages, currentUserId);
+
+    useUnreadStore
+      .getState()
+      .setConversationUnread(conversationId, unreadByRule);
+    const totalUnreadAfterUpdate = useUnreadStore.getState().totalChatUnread;
+    setBadgeCount(totalUnreadAfterUpdate);
+
+    if (unreadByRule === 0 && totalUnreadAfterUpdate === 0) {
+      clearBadgeAndNotifications();
+      clearDeliveredPushNotifications();
+    }
+
     set(state => ({
       conversations: state.conversations.map(item =>
-        item.id === conversationId ? {...item, unread_count: 0} : item,
+        item.id === conversationId
+          ? {...item, unread_count: unreadByRule}
+          : item,
       ),
     }));
+
+    if (unreadByRule > 0) {
+      return;
+    }
 
     try {
       await chatApi.markConversationRead(conversationId);
@@ -218,27 +358,46 @@ export const useChatStore = create<ChatState>((set, get) => ({
   upsertIncomingMessage: (message: ChatMessage) => {
     const snapshot = get().messagesByConversation[message.conversation_id] ?? [];
 
-    // If message already exists, update it in-place (e.g. status changed to 'closed')
     if (messageExists(snapshot, message.id)) {
+      const currentUserId = useAuthStore.getState().user?.id;
+      let unreadAfterUpdate = 0;
+
       set(state => {
         const conversationId = message.conversation_id;
         const current = state.messagesByConversation[conversationId] ?? [];
         const updated = current.map(m => (m.id === message.id ? {...m, ...message} : m));
+        unreadAfterUpdate = countUnreadByRule(
+          updated,
+          currentUserId,
+        );
         return {
           messagesByConversation: {
             ...state.messagesByConversation,
             [conversationId]: updated,
           },
+          conversations: state.conversations.map(item =>
+            item.id === conversationId
+              ? {...item, unread_count: unreadAfterUpdate}
+              : item,
+          ),
         };
       });
+
+      useUnreadStore
+        .getState()
+        .setConversationUnread(message.conversation_id, unreadAfterUpdate);
+      setBadgeCount(useUnreadStore.getState().totalChatUnread);
+
       return;
     }
 
     const conversationId = message.conversation_id;
-
-    // Increment badge for messages arriving from other users
     const currentUserId = useAuthStore.getState().user?.id;
-    if (message.sender_id != null && message.sender_id !== currentUserId) {
+    const shouldIncrement =
+      isPendingActionMessage(message, currentUserId) ||
+      isUnreadNormalMessage(message, currentUserId);
+
+    if (shouldIncrement) {
       const currentUnread =
         useUnreadStore.getState().unreadByConversation[conversationId] ?? 0;
       useUnreadStore
@@ -248,7 +407,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
 
     set(state => {
-      // Use state inside set() to avoid stale closure over `existing`
       const current = state.messagesByConversation[conversationId] ?? [];
       if (messageExists(current, message.id)) {
         return state;
@@ -274,14 +432,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
             {
               id: conversationId,
               last_message: message,
-              unread_count:
-                message.sender_id != null && message.sender_id !== currentUserId ? 1 : 0,
+              unread_count: shouldIncrement ? 1 : 0,
               updated_at: message.created_at,
             },
             ...updatedConversations,
           ];
 
-      // Bubble updated conversation to the top of the list
       const sorted = [...mergedConversations].sort((a, b) => {
         const tA = a.updated_at ? new Date(a.updated_at).getTime() : 0;
         const tB = b.updated_at ? new Date(b.updated_at).getTime() : 0;

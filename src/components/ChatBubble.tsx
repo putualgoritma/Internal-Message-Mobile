@@ -12,6 +12,9 @@ import {
 import type {ChatMessage} from '../types/models';
 import {chatApi} from '../api/chatApi';
 import {APP_CONFIG} from '../config/appConfig';
+import {setBadgeCount} from '../services/badgeService';
+import {useChatStore} from '../store/chatStore';
+import {useUnreadStore} from '../store/unreadStore';
 import {colors} from '../theme/colors';
 
 interface ChatBubbleProps {
@@ -45,6 +48,38 @@ function formatTime(value: string): string {
 
 interface ImageAttachment {
   uri: string;
+}
+
+function isActionResolved(
+  statusRaw: string,
+  message: ChatMessage,
+  metadata?: Record<string, unknown>,
+): boolean {
+  const status = statusRaw.trim().toLowerCase();
+  if (status && status !== 'pending') {
+    return true;
+  }
+
+  const msgAny = message as unknown as Record<string, unknown>;
+  const clickedFlagRaw = msgAny.action_clicked;
+  const clickedAtRaw = msgAny.action_clicked_at;
+  const clickedInMetadataRaw = metadata?.action_clicked;
+  const clickedAtInMetadataRaw = metadata?.action_clicked_at;
+
+  const isClicked =
+    clickedFlagRaw === true ||
+    clickedFlagRaw === 1 ||
+    clickedFlagRaw === '1' ||
+    clickedFlagRaw === 'true' ||
+    clickedInMetadataRaw === true ||
+    clickedInMetadataRaw === 1 ||
+    clickedInMetadataRaw === '1' ||
+    clickedInMetadataRaw === 'true' ||
+    (typeof clickedAtRaw === 'string' && clickedAtRaw.trim().length > 0) ||
+    (typeof clickedAtInMetadataRaw === 'string' &&
+      clickedAtInMetadataRaw.trim().length > 0);
+
+  return isClicked;
 }
 
 function resolveAttachmentUrl(rawValue: string): string {
@@ -125,9 +160,13 @@ function extractImageAttachments(message: ChatMessage): ImageAttachment[] {
 }
 
 export function ChatBubble({message, isOwn}: ChatBubbleProps): React.JSX.Element {
+  const fetchMessages = useChatStore(state => state.fetchMessages);
+  const markConversationRead = useChatStore(state => state.markConversationRead);
+  const upsertIncomingMessage = useChatStore(state => state.upsertIncomingMessage);
+  const unreadByConversation = useUnreadStore(state => state.unreadByConversation);
+  const setConversationUnread = useUnreadStore(state => state.setConversationUnread);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
-  const [actionDone, setActionDone] = useState(false);
   const [previewImageUri, setPreviewImageUri] = useState<string | null>(null);
 
   const imageAttachments = extractImageAttachments(message);
@@ -208,7 +247,7 @@ export function ChatBubble({message, isOwn}: ChatBubbleProps): React.JSX.Element
           ? String(metadata.status).trim()
           : '';
     const actionStatus = rawActionStatus.toLowerCase();
-    const shouldShowActions = !actionDone && actionStatus === 'pending';
+    const shouldShowActions = !isActionResolved(rawActionStatus, message, metadata);
 
     const contentText = (() => {
       const raw = String(message.content ?? '').trim();
@@ -236,9 +275,45 @@ export function ChatBubble({message, isOwn}: ChatBubbleProps): React.JSX.Element
       setActionLoading(endpoint);
       setActionError(null);
       try {
+        const wasPendingBeforeClick = !isActionResolved(rawActionStatus, message, metadata);
         await chatApi.executeAction(endpoint, method ?? 'POST', payload);
         chatApi.recordActionClick(message.id).catch(() => {});
-        setActionDone(true);
+
+        if (wasPendingBeforeClick) {
+          const currentUnread = unreadByConversation[message.conversation_id] ?? 0;
+          const nextUnread = Math.max(0, currentUnread - 1);
+          setConversationUnread(message.conversation_id, nextUnread);
+          setBadgeCount(useUnreadStore.getState().totalChatUnread);
+        }
+
+        // Refresh status and recompute unread/badge state after action handling.
+        await fetchMessages(message.conversation_id).catch(() => {});
+
+        // Optimistic local status update in case backend status propagation is delayed.
+        const clickedAtIso = new Date().toISOString();
+        const currentMetadata =
+          message.metadata &&
+          typeof message.metadata === 'object' &&
+          !Array.isArray(message.metadata)
+            ? (message.metadata as Record<string, unknown>)
+            : undefined;
+        const optimisticMessage: ChatMessage = {
+          ...(message as ChatMessage),
+          status: 'completed',
+          action_clicked: true,
+          action_clicked_at: clickedAtIso,
+          metadata: {
+            ...(currentMetadata ?? {}),
+            status: 'completed',
+            action_clicked: true,
+            action_clicked_at: clickedAtIso,
+          },
+        };
+        upsertIncomingMessage({
+          ...optimisticMessage,
+        });
+
+        await markConversationRead(message.conversation_id).catch(() => {});
       } catch (error) {
         setActionError(error instanceof Error ? error.message : 'Action failed');
       } finally {

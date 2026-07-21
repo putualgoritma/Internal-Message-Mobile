@@ -58,7 +58,7 @@ export function teardownPush(): void {
 
 export function clearDeliveredPushNotifications(): void {
   try {
-    OneSignal.Notifications.clearAllNotifications();
+    OneSignal.Notifications.clearAll();
   } catch {
     // Clearing notifications is best-effort.
   }
