@@ -49,7 +49,7 @@ export function LoginScreen(): React.JSX.Element {
           autoCapitalize="none"
           keyboardType="email-address"
           onChangeText={setEmail}
-          placeholder="Email / NIP"
+          placeholder="Email"
           placeholderTextColor={colors.textSecondary}
           style={styles.input}
           value={email}
