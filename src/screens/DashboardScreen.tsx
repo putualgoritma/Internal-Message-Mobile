@@ -20,7 +20,7 @@ import {useUnreadStore} from '../store/unreadStore';
 import {useRealtimeStore} from '../store/realtimeStore';
 import type {MainTabParamList} from '../navigation/types';
 
-type DashboardNav = BottomTabNavigationProp<MainTabParamList, 'Dashboard'>;
+type DashboardNav = BottomTabNavigationProp<MainTabParamList, 'Profile'>;
 
 function StatCard({
   title,

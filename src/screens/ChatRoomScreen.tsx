@@ -1,7 +1,10 @@
 import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {
   FlatList,
+  InteractionManager,
   KeyboardAvoidingView,
+  NativeScrollEvent,
+  NativeSyntheticEvent,
   Platform,
   Pressable,
   StyleSheet,
@@ -9,8 +12,10 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import type {FlatList as FlatListType} from 'react-native';
 
-import {RouteProp} from '@react-navigation/native';
+import {RouteProp, useFocusEffect} from '@react-navigation/native';
+import {useIsFocused} from '@react-navigation/native';
 
 import {chatApi} from '../api/chatApi';
 import {ChatBubble} from '../components/ChatBubble';
@@ -19,8 +24,67 @@ import {ErrorBanner} from '../components/ErrorBanner';
 import {colors} from '../theme/colors';
 import type {RootStackParamList} from '../navigation/types';
 import {useAuthStore} from '../store/authStore';
-import {useUnreadStore} from '../store/unreadStore';
+import {useChatStore} from '../store/chatStore';
 import type {ChatMessage} from '../types/models';
+
+interface DateSeparator {
+  kind: '__date_separator__';
+  id: string;
+  label: string;
+}
+
+type ListItem = ChatMessage | DateSeparator;
+
+function parseDate(dateStr: string): Date {
+  // Handle "YYYY-MM-DD HH:MM:SS" (no T, no timezone) from backend
+  const normalized = dateStr.replace(' ', 'T');
+  return new Date(normalized);
+}
+
+function getDateLabel(dateStr: string): string {
+  const date = parseDate(dateStr);
+  if (Number.isNaN(date.getTime())) {
+    return '';
+  }
+  const today = new Date();
+  const yesterday = new Date(today);
+  yesterday.setDate(today.getDate() - 1);
+
+  const sameDay = (a: Date, b: Date) =>
+    a.getFullYear() === b.getFullYear() &&
+    a.getMonth() === b.getMonth() &&
+    a.getDate() === b.getDate();
+
+  if (sameDay(date, today)) {
+    return 'Today';
+  }
+  if (sameDay(date, yesterday)) {
+    return 'Yesterday';
+  }
+  return date.toLocaleDateString(undefined, {day: 'numeric', month: 'long', year: 'numeric'});
+}
+
+function getDayKey(dateStr: string): string {
+  const date = parseDate(dateStr);
+  if (Number.isNaN(date.getTime())) {
+    return dateStr;
+  }
+  return `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
+}
+
+function injectDateSeparators(messages: ChatMessage[]): ListItem[] {
+  const result: ListItem[] = [];
+  let lastDayKey = '';
+  for (const msg of messages) {
+    const dayKey = getDayKey(msg.created_at);
+    if (dayKey !== lastDayKey) {
+      lastDayKey = dayKey;
+      result.push({kind: '__date_separator__', id: `sep-${dayKey}`, label: getDateLabel(msg.created_at)});
+    }
+    result.push(msg);
+  }
+  return result;
+}
 
 type ChatRoomRouteProp = RouteProp<RootStackParamList, 'ChatRoom'>;
 
@@ -28,18 +92,35 @@ interface ChatRoomScreenProps {
   route: ChatRoomRouteProp;
 }
 
-function sortMessages(messages: ChatMessage[]): ChatMessage[] {
-  return [...messages].sort(
-    (a, b) =>
-      new Date(a.created_at).getTime() - new Date(b.created_at).getTime(),
-  );
-}
+const AUTO_SCROLL_BOTTOM_THRESHOLD_PX = 120;
 
-function hasMessage(messages: ChatMessage[], messageId: number): boolean {
-  return messages.some(item => item.id === messageId);
+function sortMessages(messages: ChatMessage[]): ChatMessage[] {
+  return [...messages].sort((a, b) => {
+    const timeA = new Date(a.created_at).getTime();
+    const timeB = new Date(b.created_at).getTime();
+
+    // If both timestamps are valid, sort by time
+    if (Number.isFinite(timeA) && Number.isFinite(timeB)) {
+      return timeA - timeB;
+    }
+
+    // If only A is valid, A comes first
+    if (Number.isFinite(timeA)) {
+      return -1;
+    }
+
+    // If only B is valid, B comes first
+    if (Number.isFinite(timeB)) {
+      return 1;
+    }
+
+    // If neither is valid, maintain relative order by ID
+    return Number(a.id) - Number(b.id);
+  });
 }
 
 export function ChatRoomScreen({route}: ChatRoomScreenProps): React.JSX.Element {
+  const isFocused = useIsFocused();
   const conversationId = useMemo(() => {
     const raw = Number(route.params.conversationId);
     return Number.isFinite(raw) && raw > 0 ? raw : null;
@@ -49,73 +130,159 @@ export function ChatRoomScreen({route}: ChatRoomScreenProps): React.JSX.Element 
     return Number.isFinite(raw) && raw > 0 ? raw : null;
   }, [route.params.recipientUserId]);
 
-  const initialConversationIdRef = useRef<number | null>(conversationId);
   const [activeConversationId, setActiveConversationId] = useState<number | null>(
     conversationId,
   );
 
   const currentUserId = useAuthStore(state => state.user?.id);
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [loadingMessages, setLoadingMessages] = useState(true);
+  const fetchMessages = useChatStore(state => state.fetchMessages);
+  const markConversationRead = useChatStore(state => state.markConversationRead);
+  const loadingMessages = useChatStore(state => state.loadingMessages);
+  const messagesByConversation = useChatStore(state => state.messagesByConversation);
+
+  // Derive sorted messages from the store so realtime updates appear automatically
+  const messages = useMemo(
+    () => sortMessages(messagesByConversation[activeConversationId ?? 0] ?? []),
+    [messagesByConversation, activeConversationId],
+  );
+
+  const listItems = useMemo(() => injectDateSeparators(messages), [messages]);
+
   const [sendingMessage, setSendingMessage] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [draft, setDraft] = useState('');
+  const flatListRef = useRef<FlatListType<ListItem>>(null);
+  const lastAutoReadMessageIdRef = useRef<number | null>(null);
+  const hasInitialBottomScrollRef = useRef(false);
+  const initialMarkReadDoneRef = useRef(false);
+  const shouldStickToBottomRef = useRef(true);
+
+  const scrollToBottom = useCallback((animated: boolean) => {
+    if (listItems.length === 0) {
+      return;
+    }
+
+    InteractionManager.runAfterInteractions(() => {
+      requestAnimationFrame(() => {
+        flatListRef.current?.scrollToEnd({animated});
+      });
+    });
+  }, [listItems.length]);
+
+  const maybeScrollToBottom = useCallback(
+    (animated: boolean, force: boolean = false) => {
+      if (force || shouldStickToBottomRef.current) {
+        scrollToBottom(animated);
+      }
+    },
+    [scrollToBottom],
+  );
+
+  const handleListScroll = useCallback(
+    (event: NativeSyntheticEvent<NativeScrollEvent>) => {
+      const {contentOffset, contentSize, layoutMeasurement} = event.nativeEvent;
+      const distanceFromBottom =
+        contentSize.height - (contentOffset.y + layoutMeasurement.height);
+      shouldStickToBottomRef.current =
+        distanceFromBottom <= AUTO_SCROLL_BOTTOM_THRESHOLD_PX;
+    },
+    [],
+  );
 
   useEffect(() => {
-    let isMounted = true;
-    const targetConversationId = initialConversationIdRef.current;
+    hasInitialBottomScrollRef.current = false;
+    initialMarkReadDoneRef.current = false;
+    shouldStickToBottomRef.current = true;
+  }, [activeConversationId]);
 
-    const loadConversation = async () => {
-      if (!targetConversationId) {
-        if (isMounted) {
-          setLoadingMessages(false);
-        }
+  // Always keep the thread pinned to the latest message (bottom).
+  const messageCount = messages.length;
+  useEffect(() => {
+    if (messageCount === 0) {
+      return;
+    }
+
+    if (!hasInitialBottomScrollRef.current) {
+      hasInitialBottomScrollRef.current = true;
+      scrollToBottom(false);
+
+      if (activeConversationId && !initialMarkReadDoneRef.current) {
+        initialMarkReadDoneRef.current = true;
+        markConversationRead(activeConversationId).catch(() => {});
+      }
+    } else {
+      const latest = messages[messages.length - 1];
+      const isOwnLatest =
+        latest?.sender_id != null && latest.sender_id === currentUserId;
+      maybeScrollToBottom(true, isOwnLatest);
+    }
+  }, [
+    activeConversationId,
+    currentUserId,
+    markConversationRead,
+    maybeScrollToBottom,
+    messageCount,
+    messages,
+    scrollToBottom,
+  ]);
+
+  // Load messages from store on mount
+  useEffect(() => {
+    if (!conversationId) {
+      return;
+    }
+
+    fetchMessages(conversationId).catch(() => {});
+  }, [conversationId, fetchMessages]);
+
+  // Auto-mark-read when screen regains focus after initial positioning.
+  useFocusEffect(
+    useCallback(() => {
+      if (!activeConversationId || !initialMarkReadDoneRef.current) {
+        return () => {};
+      }
+
+      markConversationRead(activeConversationId).catch(() => {});
+
+    }, [activeConversationId, markConversationRead]),
+  );
+
+  // When a new remote message arrives while viewing this room, clear unread immediately.
+  useEffect(() => {
+    console.log('[ChatRoom] Auto-read effect: isFocused=', isFocused, 'activeConversationId=', activeConversationId, 'messagesLength=', messages.length);
+    
+    if (!isFocused || !activeConversationId || messages.length === 0) {
+      return;
+    }
+
+    try {
+      const latest = messages[messages.length - 1];
+      console.log('[ChatRoom] Latest message:', latest?.id, 'sender_id:', latest?.sender_id, 'currentUserId:', currentUserId);
+      
+      if (!latest || latest.sender_id == null || latest.sender_id === currentUserId) {
         return;
       }
 
-      if (isMounted) {
-        setLoadingMessages(true);
-        setError(null);
+      if (lastAutoReadMessageIdRef.current === latest.id) {
+        console.log('[ChatRoom] Already marked as read:', latest.id);
+        return;
       }
 
-      try {
-        const fetchedMessages = await chatApi.getMessages(targetConversationId);
-        if (isMounted) {
-          setMessages(sortMessages(fetchedMessages));
-        }
-
-        await chatApi.markConversationRead(targetConversationId);
-
-        const unreadStore = useUnreadStore.getState();
-        const previousUnread =
-          unreadStore.unreadByConversation[targetConversationId] ?? 0;
-        unreadStore.setConversationUnread(targetConversationId, 0);
-        unreadStore.setTotalChatUnread(
-          Math.max(0, unreadStore.totalChatUnread - previousUnread),
-        );
-      } catch (loadError) {
-        if (isMounted) {
-          setError(
-            loadError instanceof Error
-              ? loadError.message
-              : 'Failed to load messages.',
-          );
-        }
-      } finally {
-        if (isMounted) {
-          setLoadingMessages(false);
-        }
-      }
-    };
-
-    loadConversation().catch(() => {
-      // Errors are captured in local state above.
-    });
-
-    return () => {
-      isMounted = false;
-    };
-  }, []);
+      console.log('[ChatRoom] Marking conversation read for message:', latest.id);
+      lastAutoReadMessageIdRef.current = latest.id;
+      markConversationRead(activeConversationId).catch((err) => {
+        console.error('[ChatRoom] Error marking read:', err);
+      });
+    } catch (err) {
+      console.error('[ChatRoom] Error in auto-read effect:', err);
+    }
+  }, [
+    activeConversationId,
+    currentUserId,
+    isFocused,
+    markConversationRead,
+    messages,
+  ]);
 
   const onSubmit = useCallback(async () => {
     const trimmed = draft.trim();
@@ -148,15 +315,11 @@ export function ChatRoomScreen({route}: ChatRoomScreenProps): React.JSX.Element 
 
       if (!activeConversationId && newMessage.conversation_id) {
         setActiveConversationId(newMessage.conversation_id);
+        fetchMessages(newMessage.conversation_id).catch(() => {});
       }
 
-      setMessages(previous => {
-        if (hasMessage(previous, newMessage.id)) {
-          return previous;
-        }
-
-        return sortMessages([...previous, newMessage]);
-      });
+      // Add to store so the message appears via the store subscription
+      useChatStore.getState().upsertIncomingMessage(newMessage);
       setDraft('');
     } catch (sendError) {
       setError(
@@ -165,7 +328,7 @@ export function ChatRoomScreen({route}: ChatRoomScreenProps): React.JSX.Element 
     } finally {
       setSendingMessage(false);
     }
-  }, [activeConversationId, draft, recipientUserId]);
+  }, [activeConversationId, draft, fetchMessages, recipientUserId]);
 
   return (
     <KeyboardAvoidingView
@@ -175,15 +338,44 @@ export function ChatRoomScreen({route}: ChatRoomScreenProps): React.JSX.Element 
       {error ? <ErrorBanner message={error} /> : null}
 
       <FlatList
+        ref={flatListRef}
         contentContainerStyle={styles.list}
-        data={messages}
-        keyExtractor={item => String(item.id)}
-        renderItem={({item}) => (
-          <ChatBubble
-            isOwn={Boolean(currentUserId && item.sender_id === currentUserId)}
-            message={item}
-          />
-        )}
+        data={listItems}
+        keyExtractor={item =>
+          (item as DateSeparator).kind === '__date_separator__'
+            ? (item as DateSeparator).id
+            : String((item as ChatMessage).id)
+        }
+        onContentSizeChange={() => {
+          maybeScrollToBottom(false, !hasInitialBottomScrollRef.current);
+        }}
+        onLayout={() => {
+          maybeScrollToBottom(false, !hasInitialBottomScrollRef.current);
+        }}
+        onScrollBeginDrag={() => {
+          // Immediately stop auto-pinning when the user starts manual scrolling.
+          shouldStickToBottomRef.current = false;
+        }}
+        onScroll={handleListScroll}
+        scrollEventThrottle={16}
+        renderItem={({item}) => {
+          if ((item as DateSeparator).kind === '__date_separator__') {
+            return (
+              <View style={styles.dateSeparatorWrap}>
+                <View style={styles.dateSeparatorLine} />
+                <Text style={styles.dateSeparatorLabel}>{(item as DateSeparator).label}</Text>
+                <View style={styles.dateSeparatorLine} />
+              </View>
+            );
+          }
+          const msg = item as ChatMessage;
+          return (
+            <ChatBubble
+              isOwn={Boolean(currentUserId && msg.sender_id === currentUserId)}
+              message={msg}
+            />
+          );
+        }}
         ListEmptyComponent={
           loadingMessages ? null : (
             <EmptyState
@@ -266,5 +458,27 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     fontSize: 14,
     fontWeight: '700',
+  },
+  dateSeparatorWrap: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    marginVertical: 12,
+    paddingHorizontal: 4,
+  },
+  dateSeparatorLine: {
+    backgroundColor: colors.border,
+    flex: 1,
+    height: 1,
+  },
+  dateSeparatorLabel: {
+    color: colors.textSecondary,
+    fontSize: 12,
+    flexShrink: 0,
+    marginHorizontal: 10,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    backgroundColor: colors.background,
+    borderRadius: 10,
+    overflow: 'hidden',
   },
 });

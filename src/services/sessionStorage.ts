@@ -2,6 +2,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const SESSION_TOKEN_KEY = '@ptab_internal:session_token';
 const SESSION_USER_KEY = '@ptab_internal:session_user';
+const SESSION_FALLBACK_PUSH_ID_KEY = '@ptab_internal:fallback_push_id';
 
 export async function getSessionToken(): Promise<string | null> {
   return AsyncStorage.getItem(SESSION_TOKEN_KEY);
@@ -34,4 +35,12 @@ export async function clearSessionToken(): Promise<void> {
 
 export async function clearSessionUser(): Promise<void> {
   await AsyncStorage.removeItem(SESSION_USER_KEY);
+}
+
+export async function getFallbackPushId(): Promise<string | null> {
+  return AsyncStorage.getItem(SESSION_FALLBACK_PUSH_ID_KEY);
+}
+
+export async function setFallbackPushId(value: string): Promise<void> {
+  await AsyncStorage.setItem(SESSION_FALLBACK_PUSH_ID_KEY, value);
 }

@@ -3,11 +3,5 @@ module.exports = {
     ios: {},
     android: {},
   },
-  dependency: {
-    platforms: {
-      android: {
-        packageInstance: 'new RNVectorIconsPackage()',
-      },
-    },
-  },
+  assets: ['./assets/sounds'],
 };

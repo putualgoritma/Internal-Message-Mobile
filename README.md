@@ -51,6 +51,7 @@ Set:
 - `oneSignalAppId`
 
 For Android emulator, `10.0.2.2` is used by default.
+For iOS simulator/local development, defaults use `127.0.0.1`.
 
 Realtime parser tolerates multiple payload shapes (`message`, `notification`, `data`, `payload`) for easier backend event alignment.
 
@@ -65,6 +66,7 @@ npm run android
 iOS:
 
 ```bash
+npm start
 cd ios && pod install && cd ..
 npm run ios
 ```

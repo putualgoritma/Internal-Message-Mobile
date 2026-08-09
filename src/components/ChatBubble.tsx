@@ -1,12 +1,37 @@
-import React from 'react';
-import {StyleSheet, Text, View} from 'react-native';
+import React, {useState} from 'react';
+import {
+  ActivityIndicator,
+  Image,
+  Modal,
+  Pressable,
+  StyleSheet,
+  Text,
+  View,
+} from 'react-native';
 
 import type {ChatMessage} from '../types/models';
+import {chatApi} from '../api/chatApi';
+import {APP_CONFIG} from '../config/appConfig';
+import {setBadgeCount} from '../services/badgeService';
+import {useChatStore} from '../store/chatStore';
+import {useUnreadStore} from '../store/unreadStore';
 import {colors} from '../theme/colors';
 
 interface ChatBubbleProps {
   message: ChatMessage;
   isOwn: boolean;
+}
+
+interface ActionButtonData {
+  label: string;
+  endpoint: string;
+  method?: string;
+  payload?: Record<string, unknown>;
+}
+
+function isRejectAction(action: ActionButtonData): boolean {
+  const text = `${action.label} ${action.endpoint}`.toLowerCase();
+  return /reject|decline|deny|disapprove|cancel/.test(text);
 }
 
 function formatTime(value: string): string {
@@ -21,13 +46,361 @@ function formatTime(value: string): string {
     .padStart(2, '0')}`;
 }
 
+interface ImageAttachment {
+  uri: string;
+}
+
+function isActionResolved(
+  statusRaw: string,
+  message: ChatMessage,
+  metadata?: Record<string, unknown>,
+): boolean {
+  const status = statusRaw.trim().toLowerCase();
+  if (status && status !== 'pending') {
+    return true;
+  }
+
+  const msgAny = message as unknown as Record<string, unknown>;
+  const clickedFlagRaw = msgAny.action_clicked;
+  const clickedAtRaw = msgAny.action_clicked_at;
+  const clickedInMetadataRaw = metadata?.action_clicked;
+  const clickedAtInMetadataRaw = metadata?.action_clicked_at;
+
+  const isClicked =
+    clickedFlagRaw === true ||
+    clickedFlagRaw === 1 ||
+    clickedFlagRaw === '1' ||
+    clickedFlagRaw === 'true' ||
+    clickedInMetadataRaw === true ||
+    clickedInMetadataRaw === 1 ||
+    clickedInMetadataRaw === '1' ||
+    clickedInMetadataRaw === 'true' ||
+    (typeof clickedAtRaw === 'string' && clickedAtRaw.trim().length > 0) ||
+    (typeof clickedAtInMetadataRaw === 'string' &&
+      clickedAtInMetadataRaw.trim().length > 0);
+
+  return isClicked;
+}
+
+function resolveAttachmentUrl(rawValue: string): string {
+  const raw = rawValue.trim();
+  if (!raw) {
+    return '';
+  }
+
+  if (/^https?:\/\//i.test(raw)) {
+    return raw;
+  }
+
+  const base = APP_CONFIG.apiBaseUrl.trim();
+  const originMatch = base.match(/^(https?:\/\/[^/]+)/i);
+  const origin = originMatch?.[1] ?? '';
+  if (!origin) {
+    return raw;
+  }
+
+  const [pathPart, queryPart] = raw.split('?');
+  const encodedPath = pathPart
+    .split('/')
+    .map(segment => encodeURIComponent(decodeURIComponent(segment)))
+    .join('/');
+
+  return `${origin}${encodedPath.startsWith('/') ? '' : '/'}${encodedPath}${
+    queryPart ? `?${queryPart}` : ''
+  }`;
+}
+
+function isLikelyImage(type: string, path: string): boolean {
+  const normalizedType = type.trim().toLowerCase();
+  if (normalizedType.includes('image')) {
+    return true;
+  }
+
+  return /\.(png|jpe?g|gif|webp|bmp|heic|heif)$/i.test(path.trim());
+}
+
+function extractImageAttachments(message: ChatMessage): ImageAttachment[] {
+  const source = message as ChatMessage & {
+    attachments?: unknown;
+    metadata?: unknown;
+  };
+  const metadata =
+    source.metadata && typeof source.metadata === 'object' && !Array.isArray(source.metadata)
+      ? (source.metadata as Record<string, unknown>)
+      : undefined;
+
+  const attachmentCandidates = [source.attachments, metadata?.attachments]
+    .filter(Array.isArray)
+    .flatMap(item => item as unknown[])
+    .filter(item => item && typeof item === 'object') as Record<string, unknown>[];
+
+  const unique = new Set<string>();
+  const images: ImageAttachment[] = [];
+
+  for (const item of attachmentCandidates) {
+    const url = typeof item.url === 'string' ? item.url.trim() : '';
+    const path = typeof item.path === 'string' ? item.path.trim() : '';
+    const type = typeof item.type === 'string' ? item.type : '';
+    const rawValue = url || path;
+
+    if (!rawValue || !isLikelyImage(type, rawValue)) {
+      continue;
+    }
+
+    const resolved = resolveAttachmentUrl(rawValue);
+    if (!resolved || unique.has(resolved)) {
+      continue;
+    }
+
+    unique.add(resolved);
+    images.push({uri: resolved});
+  }
+
+  return images;
+}
+
 export function ChatBubble({message, isOwn}: ChatBubbleProps): React.JSX.Element {
-  const isSystem = message.type === 'system' || message.type === 'action';
+  const fetchMessages = useChatStore(state => state.fetchMessages);
+  const markConversationRead = useChatStore(state => state.markConversationRead);
+  const upsertIncomingMessage = useChatStore(state => state.upsertIncomingMessage);
+  const unreadByConversation = useUnreadStore(state => state.unreadByConversation);
+  const setConversationUnread = useUnreadStore(state => state.setConversationUnread);
+  const [actionLoading, setActionLoading] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [previewImageUri, setPreviewImageUri] = useState<string | null>(null);
+
+  const imageAttachments = extractImageAttachments(message);
+
+  const normalizedType = String(message.type ?? 'text').trim().toLowerCase();
+  const isSystem = normalizedType === 'system';
+  const isAction =
+    normalizedType === 'action' ||
+    normalizedType === 'action_required' ||
+    normalizedType === 'action-required';
 
   if (isSystem) {
     return (
       <View style={styles.systemWrap}>
         <Text style={styles.systemText}>{message.content}</Text>
+      </View>
+    );
+  }
+
+  if (isAction) {
+    const metadata =
+      message.metadata && typeof message.metadata === 'object' && !Array.isArray(message.metadata)
+        ? (message.metadata as Record<string, unknown>)
+        : undefined;
+    const rawActions =
+      (Array.isArray(metadata?.actions) ? metadata?.actions : undefined) ??
+      (Array.isArray(metadata?.buttons) ? metadata?.buttons : undefined) ??
+      (Array.isArray(metadata?.options) ? metadata?.options : undefined) ??
+      [];
+    const actions: ActionButtonData[] = rawActions
+      .map((item): ActionButtonData | null => {
+        if (!item || typeof item !== 'object') {
+          return null;
+        }
+
+        const data = item as Record<string, unknown>;
+        const label =
+          typeof data.label === 'string'
+            ? data.label.trim()
+            : typeof data.title === 'string'
+              ? data.title.trim()
+              : typeof data.text === 'string'
+                ? data.text.trim()
+                : '';
+        const endpoint =
+          typeof data.endpoint === 'string'
+            ? data.endpoint.trim()
+            : typeof data.url === 'string'
+              ? data.url.trim()
+              : typeof data.path === 'string'
+                ? data.path.trim()
+                : '';
+        const method =
+          typeof data.method === 'string'
+            ? data.method
+            : typeof data.http_method === 'string'
+              ? data.http_method
+              : undefined;
+        const payload =
+          data.payload && typeof data.payload === 'object' && !Array.isArray(data.payload)
+            ? (data.payload as Record<string, unknown>)
+            : undefined;
+
+        if (!label || !endpoint) {
+          return null;
+        }
+
+        return {label, endpoint, method, payload};
+      })
+      .filter((item): item is ActionButtonData => item !== null);
+    const isTwoActions = actions.length === 2;
+
+    // Show action buttons only while status is pending.
+    const rawActionStatus =
+      typeof message.status === 'string'
+        ? message.status.trim()
+        : typeof metadata?.status === 'string'
+          ? String(metadata.status).trim()
+          : '';
+    const actionStatus = rawActionStatus.toLowerCase();
+    const shouldShowActions = !isActionResolved(rawActionStatus, message, metadata);
+
+    const contentText = (() => {
+      const raw = String(message.content ?? '').trim();
+      if (raw && !/^there is no message\.?$/i.test(raw)) {
+        return raw;
+      }
+
+      const fromMetadata = [
+        metadata?.message,
+        metadata?.title,
+        metadata?.text,
+        metadata?.prompt,
+        metadata?.description,
+      ]
+        .map(item => (typeof item === 'string' ? item.trim() : ''))
+        .find(Boolean);
+
+      return fromMetadata || 'Action required';
+    })();
+
+    const handleActionPress = async (endpoint: string, method?: string, payload?: Record<string, unknown>) => {
+      console.log(
+        `[Action] button tap method="${(method ?? 'POST').toUpperCase()}" endpoint="${endpoint}"`,
+      );
+      setActionLoading(endpoint);
+      setActionError(null);
+      try {
+        const wasPendingBeforeClick = !isActionResolved(rawActionStatus, message, metadata);
+        await chatApi.executeAction(endpoint, method ?? 'POST', payload);
+        chatApi.recordActionClick(message.id).catch(() => {});
+
+        if (wasPendingBeforeClick) {
+          const currentUnread = unreadByConversation[message.conversation_id] ?? 0;
+          const nextUnread = Math.max(0, currentUnread - 1);
+          setConversationUnread(message.conversation_id, nextUnread);
+          setBadgeCount(useUnreadStore.getState().totalChatUnread);
+        }
+
+        // Refresh status and recompute unread/badge state after action handling.
+        await fetchMessages(message.conversation_id).catch(() => {});
+
+        // Optimistic local status update in case backend status propagation is delayed.
+        const clickedAtIso = new Date().toISOString();
+        const currentMetadata =
+          message.metadata &&
+          typeof message.metadata === 'object' &&
+          !Array.isArray(message.metadata)
+            ? (message.metadata as Record<string, unknown>)
+            : undefined;
+        const optimisticMessage: ChatMessage = {
+          ...(message as ChatMessage),
+          status: 'completed',
+          action_clicked: true,
+          action_clicked_at: clickedAtIso,
+          metadata: {
+            ...(currentMetadata ?? {}),
+            status: 'completed',
+            action_clicked: true,
+            action_clicked_at: clickedAtIso,
+          },
+        };
+        upsertIncomingMessage({
+          ...optimisticMessage,
+        });
+
+        await markConversationRead(message.conversation_id).catch(() => {});
+      } catch (error) {
+        setActionError(error instanceof Error ? error.message : 'Action failed');
+      } finally {
+        setActionLoading(null);
+      }
+    };
+
+    return (
+      <View style={[styles.row, styles.rowOther]}>
+        <View style={styles.actionBubble}>
+          <Text style={styles.actionContent}>{contentText}</Text>
+          {imageAttachments.length > 0 ? (
+            <View style={styles.attachmentsWrap}>
+              {imageAttachments.map(item => (
+                <Pressable
+                  key={item.uri}
+                  onPress={() => setPreviewImageUri(item.uri)}
+                  style={styles.thumbPressable}>
+                  <Image
+                    resizeMode="cover"
+                    source={{uri: item.uri}}
+                    style={styles.thumbImage}
+                  />
+                </Pressable>
+              ))}
+            </View>
+          ) : null}
+          {actionError && <Text style={styles.actionErrorText}>{actionError}</Text>}
+          {shouldShowActions ? (
+            <View
+              style={[
+                styles.actionsContainer,
+                isTwoActions && styles.actionsContainerTwo,
+              ]}>
+              {actions.map((action, index) => (
+                <Pressable
+                  key={index}
+                  disabled={actionLoading !== null}
+                  onPress={() => handleActionPress(action.endpoint, action.method, action.payload)}
+                  style={[
+                    styles.actionButton,
+                    isTwoActions && styles.actionButtonTwo,
+                    isTwoActions && index === 0 && styles.actionButtonTwoLeft,
+                    isTwoActions && index === 1 && styles.actionButtonTwoRight,
+                    isRejectAction(action) && styles.actionButtonDanger,
+                    actionLoading === action.endpoint && styles.actionButtonLoading,
+                  ]}>
+                  {actionLoading === action.endpoint ? (
+                    <ActivityIndicator
+                      size="small"
+                      color={isRejectAction(action) ? colors.danger : '#FFFFFF'}
+                    />
+                  ) : (
+                    <Text
+                      style={[
+                        styles.actionButtonLabel,
+                        isRejectAction(action) && styles.actionButtonLabelDanger,
+                      ]}>
+                      {action.label}
+                    </Text>
+                  )}
+                </Pressable>
+              ))}
+            </View>
+          ) : (
+            <Text style={styles.actionClosedText}>
+              {`Request has been processed. Status: ${rawActionStatus || 'unknown'}`}
+            </Text>
+          )}
+          <Text style={styles.actionTime}>{formatTime(message.created_at)}</Text>
+        </View>
+        <Modal
+          animationType="fade"
+          onRequestClose={() => setPreviewImageUri(null)}
+          transparent
+          visible={Boolean(previewImageUri)}>
+          <Pressable onPress={() => setPreviewImageUri(null)} style={styles.previewBackdrop}>
+            {previewImageUri ? (
+              <Image
+                resizeMode="contain"
+                source={{uri: previewImageUri}}
+                style={styles.previewImage}
+              />
+            ) : null}
+            <Text style={styles.previewHint}>Tap anywhere to close</Text>
+          </Pressable>
+        </Modal>
       </View>
     );
   }
@@ -38,10 +411,42 @@ export function ChatBubble({message, isOwn}: ChatBubbleProps): React.JSX.Element
         <Text style={[styles.content, isOwn ? styles.contentOwn : styles.contentOther]}>
           {message.content}
         </Text>
+        {imageAttachments.length > 0 ? (
+          <View style={styles.attachmentsWrap}>
+            {imageAttachments.map(item => (
+              <Pressable
+                key={item.uri}
+                onPress={() => setPreviewImageUri(item.uri)}
+                style={styles.thumbPressable}>
+                <Image
+                  resizeMode="cover"
+                  source={{uri: item.uri}}
+                  style={styles.thumbImage}
+                />
+              </Pressable>
+            ))}
+          </View>
+        ) : null}
         <Text style={[styles.time, isOwn ? styles.timeOwn : styles.timeOther]}>
           {formatTime(message.created_at)}
         </Text>
       </View>
+      <Modal
+        animationType="fade"
+        onRequestClose={() => setPreviewImageUri(null)}
+        transparent
+        visible={Boolean(previewImageUri)}>
+        <Pressable onPress={() => setPreviewImageUri(null)} style={styles.previewBackdrop}>
+          {previewImageUri ? (
+            <Image
+              resizeMode="contain"
+              source={{uri: previewImageUri}}
+              style={styles.previewImage}
+            />
+          ) : null}
+          <Text style={styles.previewHint}>Tap anywhere to close</Text>
+        </Pressable>
+      </Modal>
     </View>
   );
 }
@@ -82,6 +487,39 @@ const styles = StyleSheet.create({
     fontSize: 11,
     marginTop: 4,
   },
+  attachmentsWrap: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginTop: 8,
+    marginBottom: 4,
+  },
+  thumbPressable: {
+    borderRadius: 10,
+    overflow: 'hidden',
+  },
+  thumbImage: {
+    backgroundColor: '#DCE6F2',
+    borderRadius: 10,
+    height: 120,
+    width: 120,
+  },
+  previewBackdrop: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(0, 0, 0, 0.92)',
+    flex: 1,
+    justifyContent: 'center',
+    paddingHorizontal: 12,
+  },
+  previewImage: {
+    height: '82%',
+    width: '100%',
+  },
+  previewHint: {
+    color: '#FFFFFF',
+    fontSize: 13,
+    marginTop: 8,
+  },
   timeOwn: {
     color: '#E5EDF8',
   },
@@ -101,5 +539,82 @@ const styles = StyleSheet.create({
     paddingHorizontal: 10,
     paddingVertical: 5,
     textAlign: 'center',
+  },
+  actionBubble: {
+    backgroundColor: '#F0F4F9',
+    borderColor: colors.border,
+    borderRadius: 12,
+    borderWidth: 1,
+    maxWidth: '85%',
+    padding: 12,
+  },
+  actionContent: {
+    color: colors.textPrimary,
+    fontSize: 14,
+    marginBottom: 12,
+  },
+  actionErrorText: {
+    color: '#E53935',
+    fontSize: 12,
+    marginBottom: 8,
+  },
+  actionClosedText: {
+    color: '#E53935',
+    fontSize: 13,
+    fontStyle: 'italic',
+    marginTop: 4,
+    marginBottom: 4,
+  },
+  actionsContainer: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    marginBottom: 8,
+  },
+  actionsContainerTwo: {
+    flexWrap: 'nowrap',
+    width: '100%',
+  },
+  actionButton: {
+    alignItems: 'center',
+    backgroundColor: colors.brand,
+    borderRadius: 8,
+    justifyContent: 'center',
+    marginBottom: 8,
+    minHeight: 36,
+    minWidth: 120,
+    paddingHorizontal: 12,
+  },
+  actionButtonTwo: {
+    flex: 1,
+    minWidth: 0,
+    marginBottom: 0,
+  },
+  actionButtonTwoLeft: {
+    marginRight: 4,
+  },
+  actionButtonTwoRight: {
+    marginLeft: 4,
+  },
+  actionButtonDanger: {
+    backgroundColor: '#FFFFFF',
+    borderColor: colors.danger,
+    borderWidth: 1,
+  },
+  actionButtonLoading: {
+    opacity: 0.7,
+  },
+  actionButtonLabel: {
+    color: '#FFFFFF',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  actionButtonLabelDanger: {
+    color: colors.danger,
+  },
+  actionTime: {
+    color: colors.textSecondary,
+    fontSize: 10,
+    marginTop: 4,
+    textAlign: 'right',
   },
 });

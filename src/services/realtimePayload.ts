@@ -1,4 +1,4 @@
-import type {ChatMessage, NotificationItem} from '../types/models';
+import type {ChatMessage, MessageAttachment, NotificationItem} from '../types/models';
 
 export interface NormalizedUnreadPayload {
   totalChatUnread: number;
@@ -7,7 +7,40 @@ export interface NormalizedUnreadPayload {
   notificationUnread: number | null;
 }
 
+function tryParseJson(value: string): unknown {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+}
+
 function asObject(value: unknown): Record<string, unknown> | null {
+  if (typeof value === 'string') {
+    const first = tryParseJson(value);
+    if (first && typeof first === 'object' && !Array.isArray(first)) {
+      return first as Record<string, unknown>;
+    }
+
+    if (typeof first === 'string') {
+      const second = tryParseJson(first);
+      if (second && typeof second === 'object' && !Array.isArray(second)) {
+        return second as Record<string, unknown>;
+      }
+    }
+
+    return null;
+  }
+
   return value && typeof value === 'object'
     ? (value as Record<string, unknown>)
     : null;
@@ -25,9 +58,108 @@ function asString(value: unknown, fallback = ''): string {
   return fallback;
 }
 
+function normalizeMessageType(value: unknown): string {
+  const raw = asString(value, 'text').trim().toLowerCase();
+
+  if (raw === 'action' || raw === 'action_required' || raw === 'action-required') {
+    return 'action';
+  }
+
+  if (raw === 'system' || raw === 'info') {
+    return 'system';
+  }
+
+  return raw || 'text';
+}
+
+function normalizeMessageContent(
+  value: unknown,
+  type: string,
+  metadata?: Record<string, unknown>,
+): string {
+  const raw = asString(value, '').trim();
+  const looksLikePlaceholder = /^there is no message\.?$/i.test(raw);
+
+  if (raw && !looksLikePlaceholder) {
+    return raw;
+  }
+
+  const fromMetadata = [
+    metadata?.message,
+    metadata?.title,
+    metadata?.text,
+    metadata?.prompt,
+    metadata?.description,
+  ]
+    .map(item => asString(item, '').trim())
+    .find(Boolean);
+
+  if (fromMetadata) {
+    return fromMetadata;
+  }
+
+  return type === 'action' ? 'Action required' : raw;
+}
+
 function asNumber(value: unknown, fallback = 0): number {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function asBoolean(value: unknown): boolean | undefined {
+  if (typeof value === 'boolean') {
+    return value;
+  }
+
+  if (typeof value === 'number') {
+    return value !== 0;
+  }
+
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (!normalized) {
+      return undefined;
+    }
+    if (normalized === 'true' || normalized === '1') {
+      return true;
+    }
+    if (normalized === 'false' || normalized === '0') {
+      return false;
+    }
+  }
+
+  return undefined;
+}
+
+function normalizeAttachments(value: unknown): MessageAttachment[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  const normalized = value
+    .map((item): MessageAttachment | null => {
+      if (!item || typeof item !== 'object') {
+        return null;
+      }
+
+      const data = item as Record<string, unknown>;
+      const url = asString(data.url, '').trim();
+      const path = asString(data.path, '').trim();
+      const type = asString(data.type, '').trim();
+
+      if (!url && !path) {
+        return null;
+      }
+
+      return {
+        url: url || undefined,
+        path: path || undefined,
+        type: type || undefined,
+      };
+    })
+    .filter((item): item is MessageAttachment => item !== null);
+
+  return normalized.length > 0 ? normalized : undefined;
 }
 
 function readNestedObject(
@@ -43,19 +175,48 @@ function readNestedObject(
     }
   }
 
+  // Pusher often wraps app event payload under "data" as a JSON string.
+  const nestedData = asObject(root.data);
+  if (nestedData) {
+    for (const key of keys) {
+      const nested = asObject(nestedData[key]);
+      if (nested) {
+        return nested;
+      }
+    }
+
+    return nestedData;
+  }
+
   return root;
 }
 
 export function normalizeMessagePayload(payload: unknown): ChatMessage | null {
-  const candidate = readNestedObject(payload, ['message', 'data', 'payload']);
+  const candidate = readNestedObject(payload, [
+    'message',
+    'data',
+    'payload',
+    'chat_message',
+    'chatMessage',
+  ]);
 
   const conversationId = asNumber(
     candidate.conversation_id ?? candidate.conversationId,
     0,
   );
 
-  const content = asString(candidate.content, '').trim();
-  if (conversationId <= 0 || !content) {
+  const type = normalizeMessageType(candidate.type ?? candidate.message_type);
+  const metadata = asObject(candidate.metadata);
+  const attachments =
+    normalizeAttachments(candidate.attachments) ??
+    normalizeAttachments((metadata as Record<string, unknown> | undefined)?.attachments);
+  const content = normalizeMessageContent(
+    candidate.content ?? candidate.body ?? candidate.text ?? candidate.message,
+    type,
+    metadata ?? undefined,
+  );
+
+  if (conversationId <= 0 || (!content && !attachments?.length)) {
     return null;
   }
 
@@ -66,9 +227,17 @@ export function normalizeMessagePayload(payload: unknown): ChatMessage | null {
     id,
     conversation_id: conversationId,
     sender_id: senderIdRaw === null ? null : asNumber(senderIdRaw, 0),
-    type: asString(candidate.type, 'text'),
+    type,
     content,
+    status: candidate.status !== undefined ? asString(candidate.status, '') || undefined : undefined,
+    is_read: asBoolean(candidate.is_read ?? candidate.isRead),
+    read_at:
+      candidate.read_at !== undefined || candidate.readAt !== undefined
+        ? asString(candidate.read_at ?? candidate.readAt, '').trim() || null
+        : undefined,
     created_at: asString(candidate.created_at ?? candidate.createdAt, new Date().toISOString()),
+    attachments,
+    metadata: metadata ?? undefined,
     sender: asObject(candidate.sender)
       ? {
           id: asNumber((candidate.sender as Record<string, unknown>).id, 0),

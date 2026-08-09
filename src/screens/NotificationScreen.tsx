@@ -58,10 +58,30 @@ export function NotificationScreen(): React.JSX.Element {
 
   useFocusEffect(
     useCallback(() => {
-      fetchNotifications().catch(() => {
-        // Store already captures error state.
-      });
-    }, [fetchNotifications]),
+      let active = true;
+
+      fetchNotifications()
+        .then(async () => {
+          if (!active) {
+            return;
+          }
+
+          const hasUnread = useNotificationStore
+            .getState()
+            .notifications.some(item => !item.is_read);
+
+          if (hasUnread) {
+            await markAllRead();
+          }
+        })
+        .catch(() => {
+          // Store already captures error state.
+        });
+
+      return () => {
+        active = false;
+      };
+    }, [fetchNotifications, markAllRead]),
   );
 
   const onOpenNotification = async (item: NotificationItem): Promise<void> => {

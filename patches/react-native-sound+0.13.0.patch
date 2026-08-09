@@ -1,0 +1,75 @@
+diff --git a/node_modules/react-native-sound/ios/RNSound.mm b/node_modules/react-native-sound/ios/RNSound.mm
+index 94b2335..caf2fc9 100644
+--- a/node_modules/react-native-sound/ios/RNSound.mm
++++ b/node_modules/react-native-sound/ios/RNSound.mm
+@@ -142,7 +142,7 @@ RCT_EXPORT_METHOD(setMode:(NSString *)modeName) {
+     return modes[modeName];
+ }
+ 
+-RCT_EXPORT_METHOD(setCategory:(NSString *)categoryName mixWithOthers:(NSNumber *)mixWithOthers) {
++RCT_EXPORT_METHOD(setCategory:(NSString *)categoryName mixWithOthers:(NSNumber * _Nonnull)mixWithOthers) {
+     AVAudioSession *session = [AVAudioSession sharedInstance];
+     NSString *category = [self categoryForName:categoryName];
+     
+@@ -177,7 +177,7 @@ RCT_EXPORT_METHOD(enableInSilenceMode:(BOOL)enabled) {
+ 
+ #pragma mark - Audio Control Methods
+ 
+-RCT_EXPORT_METHOD(prepare:(NSString *)fileName key:(double)key options:(JS::NativeSoundIOS::SoundOptionTypes &)options callback:(RCTResponseSenderBlock)callback ) {
++RCT_EXPORT_METHOD(prepare:(NSString *)fileName key:(double)key options:(NSDictionary *)options callback:(RCTResponseSenderBlock)callback ) {
+     NSError *error;
+     NSURL *fileNameUrl;
+     AVAudioPlayer *player;
+diff --git a/node_modules/react-native-sound/src/index.ts b/node_modules/react-native-sound/src/index.ts
+index 3b50e00..5339a8f 100644
+--- a/node_modules/react-native-sound/src/index.ts
++++ b/node_modules/react-native-sound/src/index.ts
+@@ -33,6 +33,19 @@ const RNSound =
+     }
+   );
+ 
++const getDirectories = () => {
++  if (typeof RNSound.getDirectories === "function") {
++    return RNSound.getDirectories();
++  }
++
++  return {
++    MainBundlePath: RNSound.MainBundlePath ?? "",
++    NSDocumentDirectory: RNSound.NSDocumentDirectory ?? "",
++    NSLibraryDirectory: RNSound.NSLibraryDirectory ?? "",
++    NSCachesDirectory: RNSound.NSCachesDirectory ?? "",
++  };
++};
++
+ interface SoundProps {
+   duration?: number;
+   numberOfChannels?: number;
+@@ -242,7 +255,7 @@ class Sound {
+       if (IsAndroid) {
+         this.setAndroidVolumes();
+       } else {
+-        RNSound.setVolume(this._key, value);
++        RNSound.setVolume(this._key, value, value);
+       }
+     }
+     return this;
+@@ -378,15 +391,15 @@ class Sound {
+ 
+   public static MAIN_BUNDLE = IsAndroid
+     ? ""
+-    : RNSound.getDirectories().MainBundlePath;
++    : getDirectories().MainBundlePath;
+   public static DOCUMENT = IsAndroid
+     ? ""
+-    : RNSound.getDirectories().NSDocumentDirectory;
++    : getDirectories().NSDocumentDirectory;
+   public static LIBRARY = IsAndroid
+     ? ""
+-    : RNSound.getDirectories().NSLibraryDirectory;
++    : getDirectories().NSLibraryDirectory;
+   public static CACHES = IsAndroid
+     ? ""
+-    : RNSound.getDirectories().NSCachesDirectory;
++    : getDirectories().NSCachesDirectory;
+ }
+ export default Sound;

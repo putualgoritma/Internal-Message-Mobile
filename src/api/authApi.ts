@@ -16,6 +16,10 @@ interface RawLoginResponse {
   data?: User | {token?: string; user?: User};
 }
 
+const LOGIN_REQUEST_TIMEOUT_MS = 12000;
+const LOGIN_TIMEOUT_MESSAGE =
+  'Login request timed out. Please check your internet connection and server URL.';
+
 function normalizeLoginResponse(payload: unknown): LoginResponse {
   const raw = payload as RawLoginResponse;
   if (raw && raw.success === false) {
@@ -47,63 +51,32 @@ function normalizeLoginResponse(payload: unknown): LoginResponse {
   throw new Error('Unexpected login response');
 }
 
-function shouldRetryWithoutPush(error: unknown): boolean {
-  let message = '';
-
-  if (axios.isAxiosError(error)) {
-    const data = error.response?.data as
-      | {message?: string}
-      | string
-      | undefined;
-
-    message =
-      typeof data === 'string'
-        ? data
-        : typeof data?.message === 'string'
-        ? data.message
-        : error.message;
-  } else if (error instanceof Error) {
-    message = error.message;
-  }
-
-  if (!message) {
-    return false;
-  }
-
-  const lowered = message.toLowerCase();
-  return (
-    lowered.includes('unexpected token') ||
-    lowered.includes('no stack') ||
-    lowered.includes('syntax error')
-  );
-}
-
 export const authApi = {
   async login(
     email: string,
     password: string,
     pushId?: string | null,
   ): Promise<LoginResponse> {
-    if (pushId) {
-      try {
-        const response = await apiClient.post('/open/admin/login', {
-          email,
-          password,
-          _id_onesignal: pushId,
-        });
-        return normalizeLoginResponse(response.data);
-      } catch (error) {
-        if (!shouldRetryWithoutPush(error)) {
-          throw error;
-        }
-      }
-    }
-
-    const fallbackResponse = await apiClient.post('/open/admin/login-js', {
+    const payload: Record<string, string> = {
       email,
       password,
-    });
-    return normalizeLoginResponse(fallbackResponse.data);
+    };
+
+    if (pushId) {
+      payload._id_onesignal = pushId;
+    }
+
+    try {
+      const response = await apiClient.post('/open/admin/login', payload, {
+        timeout: LOGIN_REQUEST_TIMEOUT_MS,
+      });
+      return normalizeLoginResponse(response.data);
+    } catch (error) {
+      if (axios.isAxiosError(error) && error.code === 'ECONNABORTED') {
+        throw new Error(LOGIN_TIMEOUT_MESSAGE);
+      }
+      throw error;
+    }
   },
 
   async me(): Promise<User> {

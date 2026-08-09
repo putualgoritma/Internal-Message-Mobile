@@ -5,6 +5,10 @@ import {useChatStore} from '../store/chatStore';
 import {useNotificationStore} from '../store/notificationStore';
 import {useUnreadStore} from '../store/unreadStore';
 import {websocketService} from '../services/websocketService';
+import {
+  playIncomingMessageSound,
+  preloadIncomingMessageSound,
+} from '../services/messageSound';
 import type {ChatMessage, NotificationItem} from '../types/models';
 
 export function useRealtime(): void {
@@ -12,10 +16,17 @@ export function useRealtime(): void {
   const userId = useAuthStore(state => state.user?.id);
   const isAuthenticated = useAuthStore(state => state.isAuthenticated);
   const conversations = useChatStore(state => state.conversations);
-  const conversationIds = useMemo(
-    () => conversations.map(item => item.id),
-    [conversations],
+  const messagesByConversation = useChatStore(
+    state => state.messagesByConversation,
   );
+  const conversationIds = useMemo(() => {
+    const fromConversations = conversations.map(item => item.id);
+    const fromLoadedMessageBuckets = Object.keys(messagesByConversation)
+      .map(value => Number(value))
+      .filter(value => Number.isFinite(value) && value > 0);
+
+    return Array.from(new Set([...fromConversations, ...fromLoadedMessageBuckets]));
+  }, [conversations, messagesByConversation]);
 
   const stableConversationKey = useMemo(
     () => conversationIds.slice().sort((a, b) => a - b).join(','),
@@ -23,17 +34,32 @@ export function useRealtime(): void {
   );
 
   useEffect(() => {
+    let lastFallbackSyncAt = 0;
+
     if (!isAuthenticated || !token || !userId) {
       websocketService.disconnect();
       return;
     }
+
+    preloadIncomingMessageSound();
 
     websocketService.connect({
       token,
       userId,
       callbacks: {
         onIncomingMessage: (message: ChatMessage) => {
-          useChatStore.getState().upsertIncomingMessage(message);
+          try {
+            console.log('[Realtime] onIncomingMessage called for message:', message.id);
+            if (message.sender_id != null && message.sender_id !== userId) {
+              console.log('[Realtime] Playing sound for message from sender:', message.sender_id);
+              playIncomingMessageSound();
+            }
+            console.log('[Realtime] Upserting message to store');
+            useChatStore.getState().upsertIncomingMessage(message);
+            console.log('[Realtime] Message upserted');
+          } catch (error) {
+            console.error('[Realtime] Error handling incoming message:', error);
+          }
         },
         onIncomingNotification: (notification: NotificationItem) => {
           useNotificationStore
@@ -41,10 +67,6 @@ export function useRealtime(): void {
             .prependIncomingNotification(notification);
         },
         onUnreadUpdated: payload => {
-          useUnreadStore
-            .getState()
-            .setTotalChatUnread(payload.totalChatUnread);
-
           if (payload.conversationId && payload.conversationUnread !== null) {
             useUnreadStore
               .getState()
@@ -52,7 +74,24 @@ export function useRealtime(): void {
                 payload.conversationId,
                 payload.conversationUnread,
               );
+
+            // Fallback path: some backends only emit unread events and not message events.
+            // Pull the latest messages so Chat Room updates without manual refresh.
+            useChatStore
+              .getState()
+              .fetchMessages(payload.conversationId)
+              .catch(() => {
+                // Store captures error state.
+              });
           }
+
+          // Keep chat list in sync even if message event names differ server-side.
+          useChatStore
+            .getState()
+            .fetchConversations()
+            .catch(() => {
+              // Store captures error state.
+            });
 
           if (payload.notificationUnread !== null) {
             useUnreadStore
@@ -60,8 +99,30 @@ export function useRealtime(): void {
               .setUnreadNotificationCount(payload.notificationUnread);
           }
         },
+        onAnyRealtimeEvent: () => {
+          const now = Date.now();
+          if (now - lastFallbackSyncAt < 1000) {
+            return;
+          }
+
+          lastFallbackSyncAt = now;
+          useChatStore
+            .getState()
+            .fetchConversations()
+            .catch(() => {
+              // Store captures error state.
+            });
+        },
       },
     });
+
+    // Prime conversations so realtime subscription has channel IDs early.
+    useChatStore
+      .getState()
+      .fetchConversations()
+      .catch(() => {
+        // Store captures error state.
+      });
 
     return () => {
       websocketService.disconnect();

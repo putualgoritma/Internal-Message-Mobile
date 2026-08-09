@@ -10,17 +10,38 @@ export interface User {
 
 export type MessageType = 'text' | 'system' | 'action' | string;
 
+export interface ActionMetadata {
+  actions: Array<{
+    label: string;
+    method: string;
+    endpoint: string;
+  }>;
+}
+
+export interface MessageAttachment {
+  url?: string;
+  path?: string;
+  type?: string;
+}
+
 export interface ChatMessage {
   id: number;
   conversation_id: number;
   sender_id: number | null;
   type: MessageType;
   content: string;
+  status?: string;
+  action_clicked?: boolean | number | string;
+  action_clicked_at?: string | null;
+  is_read?: boolean;
+  read_at?: string | null;
   created_at: string;
   sender?: {
     id: number;
     name: string;
   };
+  attachments?: MessageAttachment[];
+  metadata?: ActionMetadata | Record<string, unknown>;
 }
 
 export interface Conversation {

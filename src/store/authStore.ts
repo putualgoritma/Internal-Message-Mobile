@@ -5,8 +5,10 @@ import {setAuthToken} from '../api/client';
 import {
   clearSessionUser,
   clearSessionToken,
+  getFallbackPushId,
   getSessionToken,
   getSessionUser,
+  setFallbackPushId,
   setSessionToken,
   setSessionUser,
 } from '../services/sessionStorage';
@@ -78,7 +80,22 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
     try {
       const pushId = await getPushSubscriptionId();
-      const result = await authApi.login(email.trim(), password, pushId);
+      let effectivePushId = pushId?.trim() || '';
+
+      if (!effectivePushId) {
+        const storedFallback = await getFallbackPushId();
+        if (storedFallback?.trim()) {
+          effectivePushId = storedFallback.trim();
+        } else {
+          const generatedFallback = `rn-fallback-${Date.now()}-${Math.random()
+            .toString(36)
+            .slice(2, 10)}`;
+          await setFallbackPushId(generatedFallback);
+          effectivePushId = generatedFallback;
+        }
+      }
+
+      const result = await authApi.login(email.trim(), password, effectivePushId);
       const token = result.token;
       const user = result.user;
 
